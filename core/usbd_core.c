@@ -475,7 +475,7 @@ static bool usbd_set_interface(uint8_t busid, uint8_t iface, uint8_t alt_setting
  *
  * @return true if the request was handled successfully
  */
-static bool usbd_std_device_req_handler(uint8_t busid, struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
+bool usbd_std_device_req_handler(uint8_t busid, struct usb_setup_packet *setup, uint8_t **data, uint32_t *len)
 {
     uint16_t value = setup->wValue;
     bool ret = true;
