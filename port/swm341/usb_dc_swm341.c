@@ -39,6 +39,10 @@ __WEAK void usb_dc_low_level_init(void)
 	
 	SYS->CLKEN0 |= (0x01 << SYS_CLKEN0_USB_Pos);
 	
+	__NOP(); __NOP(); __NOP(); __NOP(); __NOP();
+	
+	USBD->FFTHR = (0xFFF << 16) | (0x000 << 0);
+	
 	USBD->DEVCR = (3 << USBD_DEVCR_SPEED_Pos)  |
 				  (1 << USBD_DEVCR_DEVICE_Pos) |
 				  (1 << USBD_DEVCR_CSRDONE_Pos);
