@@ -50,6 +50,10 @@ Please note that host must support dma mode.
 
 - N32H4X
 
+### Synwit
+
+- SWM350
+
 ### Infineon
 
 - PSOC Edge E8X

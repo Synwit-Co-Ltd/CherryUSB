@@ -46,6 +46,8 @@ if CHERRYUSB
                 bool "dwc2_nation"
             config CHERRYUSB_DEVICE_DWC2_GD
                 bool "dwc2_gd"
+            config CHERRYUSB_DEVICE_DWC2_SW
+                bool "dwc2_sw"
             config CHERRYUSB_DEVICE_DWC2_CUSTOM
                 bool "dwc2_custom"
             config CHERRYUSB_DEVICE_MUSB_ES
@@ -274,6 +276,8 @@ if CHERRYUSB
                 bool "dwc2_hc"
             config CHERRYUSB_HOST_DWC2_NATION
                 bool "dwc2_nation"
+            config CHERRYUSB_HOST_DWC2_SW
+                bool "dwc2_sw"
             config CHERRYUSB_HOST_DWC2_CUSTOM
                 bool "dwc2_custom"
             config CHERRYUSB_HOST_MUSB_ES
