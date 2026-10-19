@@ -1,8 +1,3 @@
-/*
- * Copyright (c) 2022, sakumisu
- *
- * SPDX-License-Identifier: Apache-2.0
- */
 #include "usbh_core.h"
 #include "usbh_hub.h"
 
@@ -11,17 +6,15 @@
 #include "SWM341.h"
 
 /*
- * The SWM341 USB host controller executes one transaction at a time: a token
- * written to USBH.TOKEN starts a SETUP/IN/OUT transaction, the answer (ACK,
- * NAK, STALL or error) is reported through USBH.IF.RXSTAT and USBH.SR.RESP.
- * Data of at most one packet (up to 1023 bytes, TXBUF/RXBUF are 1KB) can be
- * carried by each transaction.
+ * The SWM341 USB host controller executes one transaction at a time:
+ * 	A token written to USBH.TOKEN starts a SETUP/IN/OUT transaction.
+ * 	The answer (ACK, NAK, STALL or error) is reported through USBH.IF.RXSTAT and USBH.SR.RESP.
+ * 	Data of at most one packet (up to 1023 bytes, TXBUF/RXBUF are 1KB) can be carried by each transaction.
  *
- * This driver therefore serializes all URBs into one queue. The URB at the
- * head of the queue owns the hardware and walks through its SETUP/DATA/STATUS
- * (control) or packet-by-packet (bulk/interrupt) sequence, one token per
- * completion interrupt. On NAK the URB is rotated to the tail of the queue so
- * that a NAKing HID pipe cannot starve bulk transfers.
+ * This driver therefore serializes all URBs into one queue.
+ * The URB at the head of the queue owns the hardware and walks through its SETUP/DATA/STATUS (control)
+ * or packet-by-packet (bulk/interrupt) sequence, one token per completion interrupt.
+ * On NAK the URB is rotated to the tail of the queue so that a NAKing HID pipe cannot starve bulk transfers.
  */
 
 #ifndef CONFIG_USB_SWM341_URB_NUM
@@ -33,23 +26,9 @@
 #define SWM341_TOKEN_TYPE_IN       9
 #define SWM341_TOKEN_TYPE_SETUP    13
 
-/* USBH.TOKEN.SPEED field values */
-#define SWM341_TOKEN_SPEED_LOW     2
-#define SWM341_TOKEN_SPEED_FULL    3
 
-/*
- * The Synwit library only issues a token when the frame remaining counter is
- * in this window, keeping transactions away from the SOF boundary. When the
- * current position is outside the window, wait (bounded) until it re-enters.
- */
-#define SWM341_FRAME_REMAIN_MIN    2000
-#define SWM341_FRAME_REMAIN_MAX    10000
+#define SWM341_PORT_CHANGE_MSK     (USBH_PORTSR_CONNCHG_Msk | USBH_PORTSR_ENACHG_Msk | USBH_PORTSR_SUSPCHG_Msk | USBH_PORTSR_RSTCHG_Msk)
 
-#define SWM341_PORT_CHANGE_MSK     (USBH_PORTSR_CONNCHG_Msk | USBH_PORTSR_ENACHG_Msk | \
-                                    USBH_PORTSR_SUSPCHG_Msk | USBH_PORTSR_RSTCHG_Msk)
-
-/* consecutive bus errors before an URB is failed */
-#define SWM341_ERROR_RETRIES       3
 
 enum swm341_ctrl_stage {
     SWM341_CTRL_STAGE_SETUP = 0,
@@ -136,24 +115,19 @@ static struct swm341_urb_priv *swm341_urb_cur(struct swm341_hcd *hcd)
     return usb_slist_first_entry_or_null(&hcd->urb_list, struct swm341_urb_priv, list);
 }
 
-static void swm341_wait_frame_window(void)
+static void swm341_token_send(uint8_t type, uint8_t addr, uint8_t ep,
+                              uint8_t datax, uint8_t speed, uint16_t size)
 {
     uint32_t guard = 0;
     uint32_t remain = USBH->FRAMERM;
 
-    while ((remain >= SWM341_FRAME_REMAIN_MAX) || (remain <= SWM341_FRAME_REMAIN_MIN)) {
+    while ((remain >= 10000) || (remain <= 2000)) {
         /* bounded wait, window opens at latest after the next SOF */
         if (++guard > 60000u) {
             break;
         }
         remain = USBH->FRAMERM;
     }
-}
-
-static void swm341_token_send(uint8_t type, uint8_t addr, uint8_t ep,
-                              uint8_t datax, uint8_t speed, uint16_t size)
-{
-    swm341_wait_frame_window();
 
     USBH->TOKEN = ((uint32_t)addr << USBH_TOKEN_ADDR_Pos) |
                   ((uint32_t)ep << USBH_TOKEN_EPNR_Pos) |
@@ -191,62 +165,6 @@ static void swm341_txbuf_write(const uint8_t *src, uint16_t size)
     }
 }
 
-static void swm341_urb_next_token(struct swm341_urb_priv *priv)
-{
-    struct usbh_urb *urb = priv->urb;
-    uint16_t mps = USB_GET_MAXPACKETSIZE(urb->ep->wMaxPacketSize);
-    uint8_t speed = (urb->hport->speed == USB_SPEED_LOW) ? SWM341_TOKEN_SPEED_LOW : SWM341_TOKEN_SPEED_FULL;
-    uint8_t addr = urb->hport->dev_addr;
-    uint16_t size;
-
-    if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_CONTROL) {
-        switch (priv->stage) {
-            case SWM341_CTRL_STAGE_SETUP:
-                USBH->TXTRSZ = 8;
-                swm341_txbuf_write((const uint8_t *)urb->setup, 8);
-                priv->xfer_req = 8;
-                swm341_token_send(SWM341_TOKEN_TYPE_SETUP, addr, 0, 0, speed, 8);
-                break;
-            case SWM341_CTRL_STAGE_DATA_IN:
-                size = MIN(priv->xfer_len, mps);
-                priv->xfer_req = size;
-                swm341_token_send(SWM341_TOKEN_TYPE_IN, addr, 0, priv->toggle_in, speed, size);
-                break;
-            case SWM341_CTRL_STAGE_DATA_OUT:
-                size = MIN(priv->xfer_len, mps);
-                USBH->TXTRSZ = size;
-                swm341_txbuf_write(priv->xfer_buf, size);
-                priv->xfer_req = size;
-                swm341_token_send(SWM341_TOKEN_TYPE_OUT, addr, 0, priv->toggle_out, speed, size);
-                break;
-            case SWM341_CTRL_STAGE_STATUS_IN:
-                priv->xfer_req = 0;
-                swm341_token_send(SWM341_TOKEN_TYPE_IN, addr, 0, priv->toggle_in, speed, 0);
-                break;
-            case SWM341_CTRL_STAGE_STATUS_OUT:
-            default:
-                USBH->TXTRSZ = 0;
-                priv->xfer_req = 0;
-                swm341_token_send(SWM341_TOKEN_TYPE_OUT, addr, 0, priv->toggle_out, speed, 0);
-                break;
-        }
-    } else {
-        uint8_t ep = urb->ep->bEndpointAddress & 0x0f;
-
-        if (urb->ep->bEndpointAddress & 0x80) {
-            size = MIN(priv->xfer_len, mps);
-            priv->xfer_req = size;
-            swm341_token_send(SWM341_TOKEN_TYPE_IN, addr, ep, priv->data_toggle, speed, size);
-        } else {
-            size = MIN(priv->xfer_len, mps);
-            USBH->TXTRSZ = size;
-            swm341_txbuf_write(priv->xfer_buf, size);
-            priv->xfer_req = size;
-            swm341_token_send(SWM341_TOKEN_TYPE_OUT, addr, ep, priv->data_toggle, speed, size);
-        }
-    }
-}
-
 /* start the next token of the queue head, must run in a critical section */
 static void swm341_engine_kick(struct swm341_hcd *hcd)
 {
@@ -254,7 +172,59 @@ static void swm341_engine_kick(struct swm341_hcd *hcd)
 
     if (priv && !hcd->xfer_busy && !hcd->xfer_abandon) {
         hcd->xfer_busy = true;
-        swm341_urb_next_token(priv);
+        
+        struct usbh_urb *urb = priv->urb;
+        uint16_t mps = USB_GET_MAXPACKETSIZE(urb->ep->wMaxPacketSize);
+        uint8_t speed = (urb->hport->speed == USB_SPEED_LOW) ? 2 : 3;
+        uint8_t addr = urb->hport->dev_addr;
+        uint16_t size;
+
+        if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_CONTROL) {
+            switch (priv->stage) {
+                case SWM341_CTRL_STAGE_SETUP:
+                    USBH->TXTRSZ = 8;
+                    swm341_txbuf_write((const uint8_t *)urb->setup, 8);
+                    priv->xfer_req = 8;
+                    swm341_token_send(SWM341_TOKEN_TYPE_SETUP, addr, 0, 0, speed, 8);
+                    break;
+                case SWM341_CTRL_STAGE_DATA_IN:
+                    size = MIN(priv->xfer_len, mps);
+                    priv->xfer_req = size;
+                    swm341_token_send(SWM341_TOKEN_TYPE_IN, addr, 0, priv->toggle_in, speed, size);
+                    break;
+                case SWM341_CTRL_STAGE_DATA_OUT:
+                    size = MIN(priv->xfer_len, mps);
+                    USBH->TXTRSZ = size;
+                    swm341_txbuf_write(priv->xfer_buf, size);
+                    priv->xfer_req = size;
+                    swm341_token_send(SWM341_TOKEN_TYPE_OUT, addr, 0, priv->toggle_out, speed, size);
+                    break;
+                case SWM341_CTRL_STAGE_STATUS_IN:
+                    priv->xfer_req = 0;
+                    swm341_token_send(SWM341_TOKEN_TYPE_IN, addr, 0, priv->toggle_in, speed, 0);
+                    break;
+                case SWM341_CTRL_STAGE_STATUS_OUT:
+                default:
+                    USBH->TXTRSZ = 0;
+                    priv->xfer_req = 0;
+                    swm341_token_send(SWM341_TOKEN_TYPE_OUT, addr, 0, priv->toggle_out, speed, 0);
+                    break;
+            }
+        } else {
+            uint8_t ep = urb->ep->bEndpointAddress & 0x0f;
+
+            if (urb->ep->bEndpointAddress & 0x80) {
+                size = MIN(priv->xfer_len, mps);
+                priv->xfer_req = size;
+                swm341_token_send(SWM341_TOKEN_TYPE_IN, addr, ep, priv->data_toggle, speed, size);
+            } else {
+                size = MIN(priv->xfer_len, mps);
+                USBH->TXTRSZ = size;
+                swm341_txbuf_write(priv->xfer_buf, size);
+                priv->xfer_req = size;
+                swm341_token_send(SWM341_TOKEN_TYPE_OUT, addr, ep, priv->data_toggle, speed, size);
+            }
+        }
     }
 }
 
@@ -320,129 +290,6 @@ static void swm341_kill_all_urbs(struct swm341_hcd *hcd, int errorcode)
     }
 }
 
-/* process the response of the token in flight, called from the IRQ */
-static void swm341_handle_response(struct swm341_hcd *hcd)
-{
-    struct swm341_urb_priv *priv;
-    struct usbh_urb *urb;
-    uint8_t resp = (USBH->SR & USBH_SR_RESP_Msk) >> USBH_SR_RESP_Pos;
-    uint16_t rx_size;
-
-    /* the RXSTAT interrupt means the token in flight has been answered */
-    hcd->xfer_busy = false;
-
-    if (hcd->xfer_abandon) {
-        /* belongs to an URB killed while the token was in flight, drop it */
-        hcd->xfer_abandon = false;
-        swm341_engine_kick(hcd);
-        return;
-    }
-
-    priv = swm341_urb_cur(hcd);
-    if (priv == NULL) {
-        return;
-    }
-    urb = priv->urb;
-
-    switch (resp) {
-        case USBR_ACK:
-            priv->error_retries = 0;
-
-            if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_CONTROL) {
-                switch (priv->stage) {
-                    case SWM341_CTRL_STAGE_SETUP:
-                        /* data and status stages of a control transfer start from DATA1 */
-                        priv->toggle_in = 1;
-                        priv->toggle_out = 1;
-                        if (priv->xfer_len != 0) {
-                            priv->stage = (urb->setup->bmRequestType & 0x80) ? SWM341_CTRL_STAGE_DATA_IN : SWM341_CTRL_STAGE_DATA_OUT;
-                        } else {
-                            priv->stage = (urb->setup->bmRequestType & 0x80) ? SWM341_CTRL_STAGE_STATUS_OUT : SWM341_CTRL_STAGE_STATUS_IN;
-                        }
-                        break;
-                    case SWM341_CTRL_STAGE_DATA_IN:
-                        rx_size = (USBH->SR & USBH_SR_TRSZ_Msk) >> USBH_SR_TRSZ_Pos;
-                        if (rx_size > priv->xfer_req) {
-                            rx_size = priv->xfer_req;
-                        }
-                        memcpy(priv->xfer_buf, (uint8_t *)USBH->RXBUF, rx_size);
-                        priv->xfer_buf += rx_size;
-                        priv->xfer_len -= rx_size;
-                        urb->actual_length += rx_size;
-                        priv->toggle_in ^= 1;
-                        /* short packet terminates the data stage */
-                        if ((rx_size < priv->xfer_req) || (priv->xfer_len == 0)) {
-                            priv->stage = SWM341_CTRL_STAGE_STATUS_OUT;
-                        }
-                        break;
-                    case SWM341_CTRL_STAGE_DATA_OUT:
-                        priv->xfer_buf += priv->xfer_req;
-                        priv->xfer_len -= priv->xfer_req;
-                        urb->actual_length += priv->xfer_req;
-                        priv->toggle_out ^= 1;
-                        if (priv->xfer_len == 0) {
-                            priv->stage = SWM341_CTRL_STAGE_STATUS_IN;
-                        }
-                        break;
-                    case SWM341_CTRL_STAGE_STATUS_IN:
-                    case SWM341_CTRL_STAGE_STATUS_OUT:
-                    default:
-                        swm341_urb_complete(hcd, priv, 0);
-                        break;
-                    }
-            } else {
-                if (urb->ep->bEndpointAddress & 0x80) {
-                    rx_size = (USBH->SR & USBH_SR_TRSZ_Msk) >> USBH_SR_TRSZ_Pos;
-                    if (rx_size > priv->xfer_req) {
-                        rx_size = priv->xfer_req;
-                    }
-                    memcpy(priv->xfer_buf, (uint8_t *)USBH->RXBUF, rx_size);
-                    priv->xfer_buf += rx_size;
-                    priv->xfer_len -= rx_size;
-                    urb->actual_length += rx_size;
-                    priv->data_toggle ^= 1;
-                    if ((rx_size < priv->xfer_req) || (priv->xfer_len == 0)) {
-                        swm341_urb_complete(hcd, priv, 0);
-                        break;
-                    }
-                } else {
-                    priv->xfer_buf += priv->xfer_req;
-                    priv->xfer_len -= priv->xfer_req;
-                    urb->actual_length += priv->xfer_req;
-                    priv->data_toggle ^= 1;
-                    if (priv->xfer_len == 0) {
-                        swm341_urb_complete(hcd, priv, 0);
-                        break;
-                    }
-                }
-            }
-            break;
-
-        case USBR_NAK:
-            priv->error_retries = 0;
-            if (hcd->urb_list.next->next != NULL) {
-                /* more URBs are waiting: yield the bus to them */
-                usb_slist_t *node = hcd->urb_list.next;
-                usb_slist_remove(&hcd->urb_list, node);
-                usb_slist_add_tail(&hcd->urb_list, node);
-            }
-            break;
-
-        case USBR_STALL:
-            swm341_urb_complete(hcd, priv, -USB_ERR_STALL);
-            break;
-
-        default: /* CRC, stuff, toggle, timeout, ... bus errors */
-            if (++priv->error_retries < SWM341_ERROR_RETRIES) {
-                break; /* retry the same token */
-            }
-            swm341_urb_complete(hcd, priv, -USB_ERR_IO);
-            break;
-    }
-
-    swm341_engine_kick(hcd);
-}
-
 static int usbh_reset_port(struct usbh_bus *bus, const uint8_t port)
 {
     struct swm341_hcd *hcd = &g_swm341_hcd[bus->hcd.hcd_id];
@@ -500,11 +347,6 @@ __WEAK void usb_hc_low_level_init(struct usbh_bus *bus)
     SYS->CLKEN0 |= (0x01 << SYS_CLKEN0_USB_Pos);
 }
 
-__WEAK void usb_hc_low_level_deinit(struct usbh_bus *bus)
-{
-    (void)bus;
-}
-
 int usb_hc_init(struct usbh_bus *bus)
 {
     struct swm341_hcd *hcd = &g_swm341_hcd[bus->hcd.hcd_id];
@@ -555,7 +397,6 @@ int usb_hc_deinit(struct usbh_bus *bus)
 
     USBH->PORTSR = USBH_PORTSR_CLRPOWER_Msk;
 
-    usb_hc_low_level_deinit(bus);
     return 0;
 }
 
@@ -689,8 +530,6 @@ int usbh_roothub_control(struct usbh_bus *bus, struct usb_setup_packet *setup, u
 
 int usbh_submit_urb(struct usbh_urb *urb)
 {
-    struct usbh_bus *bus;
-    struct swm341_hcd *hcd;
     struct swm341_urb_priv *priv = NULL;
     size_t flags;
     int ret = 0;
@@ -718,8 +557,7 @@ int usbh_submit_urb(struct usbh_urb *urb)
             return -USB_ERR_NOTSUPP;
     }
 
-    bus = urb->hport->bus;
-    hcd = &g_swm341_hcd[bus->hcd.hcd_id];
+    struct swm341_hcd *hcd = &g_swm341_hcd[urb->hport->bus->hcd.hcd_id];
 
     flags = usb_osal_enter_critical_section();
     for (uint8_t i = 0; i < CONFIG_USB_SWM341_URB_NUM; i++) {
@@ -810,10 +648,9 @@ void USBH_IRQHandler(uint8_t busid)
     struct usbh_bus *bus = &g_usbhost_bus[busid];
     struct swm341_hcd *hcd = &g_swm341_hcd[bus->hcd.hcd_id];
     uint32_t intr = USBH->IF;
-    uint32_t portsr;
 
     if (intr & USBH_IF_PORT_Msk) {
-        portsr = USBH->PORTSR;
+        uint32_t portsr = USBH->PORTSR;
 
         /* write 1 to the change bits to clear them */
         USBH->PORTSR = portsr & SWM341_PORT_CHANGE_MSK;
@@ -851,6 +688,124 @@ void USBH_IRQHandler(uint8_t busid)
 
     if (intr & USBH_IF_RXSTAT_Msk) {
         USBH->IF = USBH_IF_RXSTAT_Msk;
-        swm341_handle_response(hcd);
+        
+        struct swm341_urb_priv *priv;
+        struct usbh_urb *urb;
+        uint8_t resp = (USBH->SR & USBH_SR_RESP_Msk) >> USBH_SR_RESP_Pos;
+        uint16_t rx_size;
+
+        /* the RXSTAT interrupt means the token in flight has been answered */
+        hcd->xfer_busy = false;
+
+        if (hcd->xfer_abandon) {
+            /* belongs to an URB killed while the token was in flight, drop it */
+            hcd->xfer_abandon = false;
+            swm341_engine_kick(hcd);
+            return;
+        }
+
+        priv = swm341_urb_cur(hcd);
+        if (priv == NULL) {
+            return;
+        }
+        urb = priv->urb;
+
+        switch (resp) {
+            case USBR_ACK:
+                priv->error_retries = 0;
+
+                if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_CONTROL) {
+                    switch (priv->stage) {
+                        case SWM341_CTRL_STAGE_SETUP:
+                            /* data and status stages of a control transfer start from DATA1 */
+                            priv->toggle_in = 1;
+                            priv->toggle_out = 1;
+                            if (priv->xfer_len != 0) {
+                                priv->stage = (urb->setup->bmRequestType & 0x80) ? SWM341_CTRL_STAGE_DATA_IN : SWM341_CTRL_STAGE_DATA_OUT;
+                            } else {
+                                priv->stage = (urb->setup->bmRequestType & 0x80) ? SWM341_CTRL_STAGE_STATUS_OUT : SWM341_CTRL_STAGE_STATUS_IN;
+                            }
+                            break;
+                        case SWM341_CTRL_STAGE_DATA_IN:
+                            rx_size = (USBH->SR & USBH_SR_TRSZ_Msk) >> USBH_SR_TRSZ_Pos;
+                            if (rx_size > priv->xfer_req) {
+                                rx_size = priv->xfer_req;
+                            }
+                            memcpy(priv->xfer_buf, (uint8_t *)USBH->RXBUF, rx_size);
+                            priv->xfer_buf += rx_size;
+                            priv->xfer_len -= rx_size;
+                            urb->actual_length += rx_size;
+                            priv->toggle_in ^= 1;
+                            /* short packet terminates the data stage */
+                            if ((rx_size < priv->xfer_req) || (priv->xfer_len == 0)) {
+                                priv->stage = SWM341_CTRL_STAGE_STATUS_OUT;
+                            }
+                            break;
+                        case SWM341_CTRL_STAGE_DATA_OUT:
+                            priv->xfer_buf += priv->xfer_req;
+                            priv->xfer_len -= priv->xfer_req;
+                            urb->actual_length += priv->xfer_req;
+                            priv->toggle_out ^= 1;
+                            if (priv->xfer_len == 0) {
+                                priv->stage = SWM341_CTRL_STAGE_STATUS_IN;
+                            }
+                            break;
+                        case SWM341_CTRL_STAGE_STATUS_IN:
+                        case SWM341_CTRL_STAGE_STATUS_OUT:
+                        default:
+                            swm341_urb_complete(hcd, priv, 0);
+                            break;
+                        }
+                } else {
+                    if (urb->ep->bEndpointAddress & 0x80) {
+                        rx_size = (USBH->SR & USBH_SR_TRSZ_Msk) >> USBH_SR_TRSZ_Pos;
+                        if (rx_size > priv->xfer_req) {
+                            rx_size = priv->xfer_req;
+                        }
+                        memcpy(priv->xfer_buf, (uint8_t *)USBH->RXBUF, rx_size);
+                        priv->xfer_buf += rx_size;
+                        priv->xfer_len -= rx_size;
+                        urb->actual_length += rx_size;
+                        priv->data_toggle ^= 1;
+                        if ((rx_size < priv->xfer_req) || (priv->xfer_len == 0)) {
+                            swm341_urb_complete(hcd, priv, 0);
+                            break;
+                        }
+                    } else {
+                        priv->xfer_buf += priv->xfer_req;
+                        priv->xfer_len -= priv->xfer_req;
+                        urb->actual_length += priv->xfer_req;
+                        priv->data_toggle ^= 1;
+                        if (priv->xfer_len == 0) {
+                            swm341_urb_complete(hcd, priv, 0);
+                            break;
+                        }
+                    }
+                }
+                break;
+
+            case USBR_NAK:
+                priv->error_retries = 0;
+                if (hcd->urb_list.next->next != NULL) {
+                    /* more URBs are waiting: yield the bus to them */
+                    usb_slist_t *node = hcd->urb_list.next;
+                    usb_slist_remove(&hcd->urb_list, node);
+                    usb_slist_add_tail(&hcd->urb_list, node);
+                }
+                break;
+
+            case USBR_STALL:
+                swm341_urb_complete(hcd, priv, -USB_ERR_STALL);
+                break;
+
+            default: /* CRC, stuff, toggle, timeout, ... bus errors */
+                if (++priv->error_retries < 3) {
+                    break; /* retry the same token */
+                }
+                swm341_urb_complete(hcd, priv, -USB_ERR_IO);
+                break;
+        }
+
+        swm341_engine_kick(hcd);
     }
 }
