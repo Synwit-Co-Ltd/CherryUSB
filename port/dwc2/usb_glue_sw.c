@@ -61,7 +61,11 @@ static volatile uint8_t g_usb_dwc2_busid = 0;
  * Lower the matching entry below to that value and keep the total within 668 words.
  */
 const struct dwc2_user_params param_swm350 = {
-    .phy_type = DWC2_PHY_TYPE_PARAM_UTMI, /* internal UTMI+ phy, HS capable */
+#ifdef CONFIG_USB_HS
+    .phy_type = DWC2_PHY_TYPE_PARAM_UTMI,
+#else
+    .phy_type = DWC2_PHY_TYPE_PARAM_FS,
+#endif
     .phy_utmi_width = 16,
 
     .device_dma_enable = false, /* slave mode, same as the vendor stack */
