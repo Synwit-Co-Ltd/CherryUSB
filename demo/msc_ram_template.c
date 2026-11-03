@@ -16,35 +16,32 @@
 
 #define USB_CONFIG_SIZE (9 + MSC_DESCRIPTOR_LEN)
 
-#ifdef CONFIG_USB_HS
-#define MSC_MAX_MPS 512
-#else
-#define MSC_MAX_MPS 64
-#endif
-
 static const uint8_t device_descriptor[] = {
     USB_DEVICE_DESCRIPTOR_INIT(USB_2_0, 0x00, 0x00, 0x00, USBD_VID, USBD_PID, 0x0200, 0x01)
 };
 
-static const uint8_t config_descriptor[] = {
+static const uint8_t config_descriptor_hs[] = {
     USB_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE, 0x01, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
-    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, MSC_MAX_MPS, 0x02)
+    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, USB_BULK_EP_MPS_HS, 0x02)
+};
+
+static const uint8_t config_descriptor_fs[] = {
+    USB_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE, 0x01, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
+    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, USB_BULK_EP_MPS_FS, 0x02)
 };
 
 static const uint8_t device_quality_descriptor[] = {
-    ///////////////////////////////////////
-    /// device qualifier descriptor
-    ///////////////////////////////////////
-    0x0a,
-    USB_DESCRIPTOR_TYPE_DEVICE_QUALIFIER,
-    0x00,
-    0x02,
-    0x00,
-    0x00,
-    0x00,
-    0x40,
-    0x00,
-    0x00,
+    USB_DEVICE_QUALIFIER_DESCRIPTOR_INIT(USB_2_0, 0x00, 0x00, 0x00, 0x01),
+};
+
+static const uint8_t other_speed_config_descriptor_hs[] = {
+    USB_OTHER_SPEED_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE, 0x01, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
+    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, USB_BULK_EP_MPS_FS, 0x02)
+};
+
+static const uint8_t other_speed_config_descriptor_fs[] = {
+    USB_OTHER_SPEED_CONFIG_DESCRIPTOR_INIT(USB_CONFIG_SIZE, 0x01, 0x01, USB_CONFIG_BUS_POWERED, USBD_MAX_POWER),
+    MSC_DESCRIPTOR_INIT(0x00, MSC_OUT_EP, MSC_IN_EP, USB_BULK_EP_MPS_HS, 0x02)
 };
 
 static const char *string_descriptors[] = {
@@ -56,22 +53,45 @@ static const char *string_descriptors[] = {
 
 static const uint8_t *device_descriptor_callback(uint8_t speed)
 {
+    (void)speed;
+
     return device_descriptor;
 }
 
 static const uint8_t *config_descriptor_callback(uint8_t speed)
 {
-    return config_descriptor;
+    if (speed == USB_SPEED_HIGH) {
+        return config_descriptor_hs;
+    } else if (speed == USB_SPEED_FULL) {
+        return config_descriptor_fs;
+    } else {
+        return NULL;
+    }
 }
 
 static const uint8_t *device_quality_descriptor_callback(uint8_t speed)
 {
+    (void)speed;
+
     return device_quality_descriptor;
+}
+
+static const uint8_t *other_speed_config_descriptor_callback(uint8_t speed)
+{
+    if (speed == USB_SPEED_HIGH) {
+        return other_speed_config_descriptor_hs;
+    } else if (speed == USB_SPEED_FULL) {
+        return other_speed_config_descriptor_fs;
+    } else {
+        return NULL;
+    }
 }
 
 static const char *string_descriptor_callback(uint8_t speed, uint8_t index)
 {
-    if (index > 3) {
+    (void)speed;
+
+    if (index >= (sizeof(string_descriptors) / sizeof(char *))) {
         return NULL;
     }
     return string_descriptors[index];
@@ -81,6 +101,7 @@ const struct usb_descriptor msc_ram_descriptor = {
     .device_descriptor_callback = device_descriptor_callback,
     .config_descriptor_callback = config_descriptor_callback,
     .device_quality_descriptor_callback = device_quality_descriptor_callback,
+    .other_speed_descriptor_callback = other_speed_config_descriptor_callback,
     .string_descriptor_callback = string_descriptor_callback
 };
 
@@ -109,7 +130,7 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
     }
 }
 
-#if !defined(RT_CHERRYUSB_DEVICE_TEMPLATE_MSC_BLKDEV) && !defined(PKG_CHERRYUSB_DEVICE_TEMPLATE_MSC_BLKDEV)
+#if !defined(RT_CHERRYUSB_DEVICE_MSC_BLKDEV) && !defined(PKG_CHERRYUSB_DEVICE_MSC_BLKDEV)
 #define BLOCK_SIZE  512
 #define BLOCK_COUNT 10
 
@@ -138,58 +159,19 @@ int usbd_msc_sector_write(uint8_t busid, uint8_t lun, uint32_t sector, uint8_t *
         memcpy(mass_block[sector].BlockSpace, buffer, length);
     return 0;
 }
-#else
-#include <rtthread.h>
-#include <rtdevice.h>
-
-#ifndef CONFIG_USBDEV_MSC_THREAD
-#error "Please enable CONFIG_USBDEV_MSC_THREAD, move msc read & write from isr to thread"
-#endif
-
-#ifndef CONFIG_USBDEV_MSC_BLOCK_DEV_NAME
-#define CONFIG_USBDEV_MSC_BLOCK_DEV_NAME "sd0"
-#endif
-
-static rt_device_t blk_dev = RT_NULL;
-struct rt_device_blk_geometry geometry = { 0 };
-
-void usbd_msc_get_cap(uint8_t busid, uint8_t lun, uint32_t *block_num, uint32_t *block_size)
-{
-    rt_device_control(blk_dev, RT_DEVICE_CTRL_BLK_GETGEOME, &geometry);
-
-    *block_num = geometry.sector_count;
-    *block_size = geometry.bytes_per_sector;
-}
-
-int usbd_msc_sector_read(uint8_t busid, uint8_t lun, uint32_t sector, uint8_t *buffer, uint32_t length)
-{
-    rt_device_read(blk_dev, sector, buffer, length / geometry.bytes_per_sector);
-    return 0;
-}
-
-int usbd_msc_sector_write(uint8_t busid, uint8_t lun, uint32_t sector, uint8_t *buffer, uint32_t length)
-{
-    rt_device_write(blk_dev, sector, buffer, length / geometry.bytes_per_sector);
-    return 0;
-}
 #endif
 
 static struct usbd_interface intf0;
 
 void msc_ram_init(uint8_t busid, uintptr_t reg_base)
 {
-#if defined(RT_CHERRYUSB_DEVICE_TEMPLATE_MSC_BLKDEV) || defined(PKG_CHERRYUSB_DEVICE_TEMPLATE_MSC_BLKDEV)
-    rt_err_t res;
-
-    blk_dev = rt_device_find(CONFIG_USBDEV_MSC_BLOCK_DEV_NAME);
-    RT_ASSERT(blk_dev);
-
-    res = rt_device_open(blk_dev, RT_DEVICE_OFLAG_RDWR);
-    RT_ASSERT(res == RT_EOK);
-#endif
     usbd_desc_register(busid, &msc_ram_descriptor);
-
+#if defined(RT_CHERRYUSB_DEVICE_MSC_BLKDEV) || defined(PKG_CHERRYUSB_DEVICE_MSC_BLKDEV)
+    extern void usbd_msc_blkdev_init(uint8_t busid, uint8_t in_ep, uint8_t out_ep);
+    usbd_msc_blkdev_init(busid, MSC_IN_EP, MSC_OUT_EP);
+#else
     usbd_add_interface(busid, usbd_msc_init_intf(busid, &intf0, MSC_OUT_EP, MSC_IN_EP));
+#endif
 
     usbd_initialize(busid, reg_base, usbd_event_handler);
 }

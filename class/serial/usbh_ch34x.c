@@ -8,7 +8,7 @@
 #include "usbh_ch34x.h"
 
 #undef USB_DBG_TAG
-#define USB_DBG_TAG "usbh_ch43x"
+#define USB_DBG_TAG "usbh_ch34x"
 #include "usb_log.h"
 
 struct usbh_ch34x {
@@ -103,7 +103,7 @@ static int usbh_ch34x_control_in(struct usbh_serial *serial, uint8_t bRequest, u
     setup->wLength = size;
 
     ret = usbh_control_transfer(serial->hport, setup, serial->iobuffer);
-    if (ret < 0) {
+    if (ret < size) {
         return ret;
     }
     memcpy(data, serial->iobuffer, size);
@@ -199,6 +199,7 @@ static int usbh_ch34x_set_line_coding(struct usbh_serial *serial, struct cdc_lin
     uint16_t index = 0;
     uint8_t factor = 0;
     uint8_t divisor = 0;
+    int ret;
 
     switch (line_coding->bParityType) {
         case 0:
@@ -240,7 +241,10 @@ static int usbh_ch34x_set_line_coding(struct usbh_serial *serial, struct cdc_lin
         reg_value |= CH341_L_SB;
     }
 
-    usbh_ch34x_get_baudrate_div(line_coding->dwDTERate, &factor, &divisor);
+    ret = usbh_ch34x_get_baudrate_div(line_coding->dwDTERate, &factor, &divisor);
+    if (ret < 0) {
+        return ret;
+    }
 
     reg_value |= 0xC0;
     value |= 0x9c;

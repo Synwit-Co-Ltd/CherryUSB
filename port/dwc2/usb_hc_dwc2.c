@@ -293,11 +293,10 @@ static void dwc2_chan_init(struct usbh_bus *bus,
                            uint8_t ep_mult,
                            uint8_t speed)
 {
+    USB_OTG_HC((uint32_t)ch_num)->HCINTMSK = 0U;
+
     /* Clear old interrupt conditions for this host channel. */
     USB_OTG_HC((uint32_t)ch_num)->HCINT = 0xFFFFFFFFU;
-
-    /* Enable channel interrupts required for this transfer. */
-    USB_OTG_HC((uint32_t)ch_num)->HCINTMSK = USB_OTG_HCINTMSK_CHHM;
 
     /* Enable the top level host channel interrupt. */
     USB_OTG_HOST->HAINTMSK |= 1UL << (ch_num & 0xFU);
@@ -310,6 +309,7 @@ static inline void dwc2_chan_transfer(struct usbh_bus *bus, uint8_t ch_num, uint
 {
     __IO uint32_t tmpreg;
     uint8_t is_oddframe;
+    size_t flags;
 
     /* Initialize the HCTSIZn register */
     USB_OTG_HC(ch_num)->HCTSIZ = (size & USB_OTG_HCTSIZ_XFRSIZ) |
@@ -318,6 +318,11 @@ static inline void dwc2_chan_transfer(struct usbh_bus *bus, uint8_t ch_num, uint
 
     /* xfer_buff MUST be 32-bits aligned */
     USB_OTG_HC(ch_num)->HCDMA = (uint32_t)buf;
+
+    flags = usb_osal_enter_critical_section();
+
+    /* Enable channel interrupts required for this transfer. */
+    USB_OTG_HC((uint32_t)ch_num)->HCINTMSK = USB_OTG_HCINTMSK_CHHM;
 
     is_oddframe = (((uint32_t)USB_OTG_HOST->HFNUM & 0x01U) != 0U) ? 0U : 1U;
     USB_OTG_HC(ch_num)->HCCHAR &= ~USB_OTG_HCCHAR_ODDFRM;
@@ -328,6 +333,8 @@ static inline void dwc2_chan_transfer(struct usbh_bus *bus, uint8_t ch_num, uint
     tmpreg &= ~USB_OTG_HCCHAR_CHDIS;
     tmpreg |= USB_OTG_HCCHAR_CHENA;
     USB_OTG_HC(ch_num)->HCCHAR = tmpreg;
+
+    usb_osal_leave_critical_section(flags);
 }
 
 static inline void dwc2_chan_enable_csplit(struct usbh_bus *bus, uint8_t ch_num, bool enable)
@@ -513,6 +520,7 @@ static uint16_t dwc2_calculate_packet_num(uint32_t input_size, uint8_t ep_addr, 
     if (ep_addr & 0x80) {
         input_size = num_packets * ep_mps;
     } else {
+        input_size = MIN(0x3FF * ep_mps, input_size);
     }
 
     *output_size = input_size;
@@ -650,15 +658,8 @@ static void dwc2_iso_urb_init(struct usbh_bus *bus, uint8_t chidx, struct usbh_u
 }
 #endif
 
-__WEAK void usb_hc_low_level_init(struct usbh_bus *bus)
-{
-    (void)bus;
-}
-
-__WEAK void usb_hc_low_level_deinit(struct usbh_bus *bus)
-{
-    (void)bus;
-}
+extern void usb_hc_low_level_init(struct usbh_bus *bus);
+extern void usb_hc_low_level_deinit(struct usbh_bus *bus);
 
 int usb_hc_init(struct usbh_bus *bus)
 {
@@ -688,6 +689,7 @@ int usb_hc_init(struct usbh_bus *bus)
 
     for (uint8_t chidx = 0; chidx < g_dwc2_hcd[bus->hcd.hcd_id].hw_params.host_channels; chidx++) {
         g_dwc2_hcd[bus->hcd.hcd_id].chan_pool[chidx].waitsem = usb_osal_sem_create(0);
+        USB_ASSERT(g_dwc2_hcd[bus->hcd.hcd_id].chan_pool[chidx].waitsem != NULL);
     }
 
     USB_LOG_INFO("dwc2 has %d channels and dfifo depth(32-bit words) is %d\r\n",
@@ -1034,21 +1036,14 @@ int usbh_submit_urb(struct usbh_urb *urb)
 
     if (urb->setup) {
         usb_dcache_clean((uintptr_t)urb->setup, USB_ALIGN_UP(sizeof(struct usb_setup_packet), CONFIG_USB_ALIGN_SIZE));
+    }
 
-        if (urb->transfer_buffer) {
-            if (urb->setup->bmRequestType & 0x80) {
-                usb_dcache_invalidate((uintptr_t)urb->transfer_buffer, USB_ALIGN_UP(urb->transfer_buffer_length, CONFIG_USB_ALIGN_SIZE));
-            } else {
-                usb_dcache_clean((uintptr_t)urb->transfer_buffer, USB_ALIGN_UP(urb->transfer_buffer_length, CONFIG_USB_ALIGN_SIZE));
-            }
-        }
-    } else if (urb->transfer_buffer && (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) != USB_ENDPOINT_TYPE_ISOCHRONOUS)) {
-        if (urb->ep->bEndpointAddress & 0x80) {
+    if (urb->transfer_buffer) {
+        if ((urb->setup && urb->setup->bmRequestType & 0x80) || (urb->ep->bEndpointAddress & 0x80)) {
             usb_dcache_invalidate((uintptr_t)urb->transfer_buffer, USB_ALIGN_UP(urb->transfer_buffer_length, CONFIG_USB_ALIGN_SIZE));
         } else {
             usb_dcache_clean((uintptr_t)urb->transfer_buffer, USB_ALIGN_UP(urb->transfer_buffer_length, CONFIG_USB_ALIGN_SIZE));
         }
-    } else {
     }
 
     switch (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes)) {
@@ -1099,10 +1094,15 @@ int usbh_kill_urb(struct usbh_urb *urb)
     flags = usb_osal_enter_critical_section();
 
     chan = (struct dwc2_chan *)urb->hcpriv;
+    if (!chan) {
+        usb_osal_leave_critical_section(flags);
+        return -USB_ERR_INVAL;
+    }
 
     dwc2_halt(bus, chan->chidx);
 
     urb->errorcode = -USB_ERR_SHUTDOWN;
+    usb_osal_leave_critical_section(flags);
 
     if (urb->timeout) {
         usb_osal_sem_give(chan->waitsem);
@@ -1113,8 +1113,6 @@ int usbh_kill_urb(struct usbh_urb *urb)
     if (urb->complete) {
         urb->complete(urb->arg, urb->errorcode);
     }
-
-    usb_osal_leave_critical_section(flags);
 
     return 0;
 }

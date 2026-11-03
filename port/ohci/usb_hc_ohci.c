@@ -50,6 +50,7 @@ int ohci_init(struct usbh_bus *bus)
     for (uint8_t index = 0; index < CONFIG_USB_OHCI_ED_NUM; index++) {
         ed = &g_ohci_ed_pool[bus->hcd.hcd_id][index];
         ed->waitsem = usb_osal_sem_create(0);
+        USB_ASSERT(ed->waitsem != NULL);
     }
 
     USB_LOG_INFO("OHCI hcrevision:0x%02x\r\n", (unsigned int)OHCI_HCOR->hcrevision);
@@ -308,15 +309,8 @@ void OHCI_IRQHandler(uint8_t busid)
 }
 
 #ifndef CONFIG_USB_EHCI_WITH_OHCI
-__WEAK void usb_hc_low_level_init(struct usbh_bus *bus)
-{
-    (void)bus;
-}
-
-__WEAK void usb_hc_low_level_deinit(struct usbh_bus *bus)
-{
-    (void)bus;
-}
+extern void usb_hc_low_level_init(struct usbh_bus *bus);
+extern void usb_hc_low_level_deinit(struct usbh_bus *bus);
 
 int usb_hc_init(struct usbh_bus *bus)
 {

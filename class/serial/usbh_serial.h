@@ -9,14 +9,20 @@
 
 #include "usb_cdc.h"
 
+#ifndef CONFIG_USBHOST_SERIAL_BULKIN_SIZE
+#define CONFIG_USBHOST_SERIAL_BULKIN_SIZE 512
+#endif
+
 #define USBH_SERIAL_CTRL_NOCACHE_OFFSET 0
 #define USBH_SERIAL_CTRL_NOCACHE_SIZE   32
 #define USBH_SERIAL_INT_NOCACHE_OFFSET  USB_ALIGN_UP(USBH_SERIAL_CTRL_NOCACHE_SIZE, CONFIG_USB_ALIGN_SIZE)
 #define USBH_SERIAL_INT_NOCACHE_SIZE    32
 #define USBH_SERIAL_RX_NOCACHE_OFFSET   USB_ALIGN_UP((USBH_SERIAL_INT_NOCACHE_OFFSET + USBH_SERIAL_INT_NOCACHE_SIZE), CONFIG_USB_ALIGN_SIZE)
-#define USBH_SERIAL_RX_NOCACHE_SIZE     512
-#define USBH_SERIAL_RX2_NOCACHE_OFFSET  USB_ALIGN_UP((USBH_SERIAL_RX_NOCACHE_OFFSET + USBH_SERIAL_RX_NOCACHE_SIZE), CONFIG_USB_ALIGN_SIZE)
-#define USBH_SERIAL_RX2_NOCACHE_SIZE    512
+#define USBH_SERIAL_RX2_NOCACHE_OFFSET  USB_ALIGN_UP((USBH_SERIAL_RX_NOCACHE_OFFSET + CONFIG_USBHOST_SERIAL_BULKIN_SIZE), CONFIG_USB_ALIGN_SIZE)
+
+#if CONFIG_USBHOST_SERIAL_RX_SIZE < CONFIG_USBHOST_SERIAL_BULKIN_SIZE
+#error "CONFIG_USBHOST_SERIAL_RX_SIZE must be greater than or equal to CONFIG_USBHOST_SERIAL_BULKIN_SIZE"
+#endif
 
 #define USBH_SERIAL_DATABITS_5 5
 #define USBH_SERIAL_DATABITS_6 6
@@ -66,13 +72,6 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-typedef struct {
-    uint32_t in;   /*!< Define the write pointer.               */
-    uint32_t out;  /*!< Define the read pointer.                */
-    uint32_t mask; /*!< Define the write and read pointer mask. */
-    void *pool;    /*!< Define the memory pointer.              */
-} usbh_serial_ringbuf_t;
 
 /*
  * Counters of the input lines (CTS, DSR, RI, CD) interrupts
@@ -143,12 +142,13 @@ struct usbh_serial {
 
     const struct usbh_serial_driver *driver;
 
-    usbh_serial_ringbuf_t rx_rb;
+    usb_ringbuffer_t rx_rb;
     uint8_t rx_rb_pool[CONFIG_USBHOST_SERIAL_RX_SIZE];
     usb_osal_sem_t rx_complete_sem;
     uint8_t rx_buf_index;
     int rx_errorcode;
     usbh_serial_rx_complete_callback_t rx_complete_callback;
+    bool rx_pending;
 
     void *priv;      /* Private Data */
     void *user_data; /* User Data */

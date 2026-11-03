@@ -79,6 +79,7 @@ static int usbh_cdc_ecm_connect(struct usbh_hubport *hport, uint8_t intf)
     uint8_t *p;
     uint8_t cur_iface = 0xff;
     uint8_t mac_str_idx = 0xff;
+    uint32_t desc_len = 0;
 
     struct usbh_cdc_ecm *cdc_ecm_class = &g_cdc_ecm_class;
 
@@ -91,15 +92,21 @@ static int usbh_cdc_ecm_connect(struct usbh_hubport *hport, uint8_t intf)
     hport->config.intf[intf].priv = cdc_ecm_class;
     hport->config.intf[intf + 1].priv = NULL;
 
+    if (hport->config.intf[intf + 1].altsetting[0].intf_desc.bInterfaceClass != USB_DEVICE_CLASS_CDC_DATA) {
+        return -USB_ERR_INVAL;
+    }
+
     p = hport->raw_config_desc;
-    while (p[DESC_bLength]) {
+    while (desc_len < hport->config.config_desc.wTotalLength) {
         switch (p[DESC_bDescriptorType]) {
             case USB_DESCRIPTOR_TYPE_INTERFACE:
                 cur_iface = p[INTF_DESC_bInterfaceNumber];
                 //cur_alt_setting = p[INTF_DESC_bAlternateSetting];
                 break;
             case CDC_CS_INTERFACE:
-                if ((cur_iface == cdc_ecm_class->ctrl_intf) && p[DESC_bDescriptorSubType] == CDC_FUNC_DESC_ETHERNET_NETWORKING) {
+                if ((cur_iface == cdc_ecm_class->ctrl_intf) &&
+                    (p[DESC_bDescriptorSubType] == CDC_FUNC_DESC_ETHERNET_NETWORKING) &&
+                    (p[DESC_bLength] == sizeof(struct cdc_eth_descriptor))) {
                     struct cdc_eth_descriptor *desc = (struct cdc_eth_descriptor *)p;
                     mac_str_idx = desc->iMACAddress;
                     cdc_ecm_class->max_segment_size = desc->wMaxSegmentSize;
@@ -111,6 +118,7 @@ static int usbh_cdc_ecm_connect(struct usbh_hubport *hport, uint8_t intf)
                 break;
         }
         /* skip to next descriptor */
+        desc_len += p[DESC_bLength];
         p += p[DESC_bLength];
     }
 
@@ -239,9 +247,7 @@ void usbh_cdc_ecm_rx_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
 
     (void)CONFIG_USB_OSAL_THREAD_GET_ARGV;
     USB_LOG_INFO("Create cdc ecm rx thread\r\n");
-    // clang-format off
-find_class:
-    // clang-format on
+
     g_cdc_ecm_class.connect_status = false;
     if (usbh_find_class_instance("/dev/cdc_ether") == NULL) {
         goto delete;
@@ -250,8 +256,7 @@ find_class:
     while (g_cdc_ecm_class.connect_status == false) {
         ret = usbh_cdc_ecm_get_connect_status(&g_cdc_ecm_class);
         if (ret < 0) {
-            usb_osal_msleep(100);
-            goto find_class;
+            goto delete;
         }
         usb_osal_msleep(128);
     }
@@ -261,25 +266,22 @@ find_class:
         usbh_bulk_urb_fill(&g_cdc_ecm_class.bulkin_urb, g_cdc_ecm_class.hport, g_cdc_ecm_class.bulkin, g_cdc_ecm_rx_buffer, CONFIG_USBHOST_CDC_ECM_ETH_MAX_SIZE, USB_OSAL_WAITING_FOREVER, NULL, NULL);
         ret = usbh_submit_urb(&g_cdc_ecm_class.bulkin_urb);
         if (ret < 0) {
-            goto find_class;
+            goto delete;
         }
 
         g_cdc_ecm_rx_length = g_cdc_ecm_class.bulkin_urb.actual_length;
+        if (g_cdc_ecm_rx_length == 0) {
+            continue;
+        }
 
-        /* A transfer is complete because last packet is a short packet.
-         * Short packet is not zero, match g_cdc_ecm_rx_length % USB_GET_MAXPACKETSIZE(g_cdc_ecm_class.bulkin->wMaxPacketSize).
-         * Short packet is zero, check if g_cdc_ecm_class.bulkin_urb.actual_length < transfer_size, for example transfer is complete with size is 512 < 1514.
-         * This case is always true
-        */
-        if (g_cdc_ecm_rx_length % USB_GET_MAXPACKETSIZE(g_cdc_ecm_class.bulkin->wMaxPacketSize) ||
-            (g_cdc_ecm_class.bulkin_urb.actual_length < CONFIG_USBHOST_CDC_ECM_ETH_MAX_SIZE)) {
+        if (g_cdc_ecm_rx_length < CONFIG_USBHOST_CDC_ECM_ETH_MAX_SIZE) {
             USB_LOG_DBG("rxlen:%d\r\n", g_cdc_ecm_rx_length);
 
             usbh_cdc_ecm_eth_input(g_cdc_ecm_rx_buffer, g_cdc_ecm_rx_length);
 
             g_cdc_ecm_rx_length = 0;
         } else {
-            /* There's no way to run here. */
+            USB_LOG_ERR("cdc ecm rx packet overflow\r\n");
         }
     }
     // clang-format off
@@ -298,6 +300,10 @@ int usbh_cdc_ecm_eth_output(uint32_t buflen)
 {
     if (g_cdc_ecm_class.connect_status == false) {
         return -USB_ERR_NOTCONN;
+    }
+
+    if (buflen > sizeof(g_cdc_ecm_tx_buffer)) {
+        return -USB_ERR_NOMEM;
     }
 
     USB_LOG_DBG("txlen:%d\r\n", buflen);

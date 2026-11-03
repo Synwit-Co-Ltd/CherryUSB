@@ -24,6 +24,8 @@ extern "C" {
 #include "usb_dc.h"
 #include "usb_osal.h"
 #include "usb_memcpy.h"
+#include "usb_ringbuffer.h"
+#include "usb_mempool.h"
 #include "usb_dcache.h"
 #include "usb_version.h"
 
@@ -42,6 +44,10 @@ enum usbd_event_type {
     USBD_EVENT_SET_INTERFACE,     /** USB interface selected */
     USBD_EVENT_SET_REMOTE_WAKEUP, /** USB set remote wakeup */
     USBD_EVENT_CLR_REMOTE_WAKEUP, /** USB clear remote wakeup */
+    USBD_EVENT_SET_U1_ENABLE,     /** USB U1 enable */
+    USBD_EVENT_SET_U2_ENABLE,     /** USB U2 enable */
+    USBD_EVENT_CLR_U1_ENABLE,     /** USB U1 disable */
+    USBD_EVENT_CLR_U2_ENABLE,     /** USB U2 disable */
     USBD_EVENT_INIT,              /** USB init done when call usbd_initialize */
     USBD_EVENT_DEINIT,            /** USB deinit done when call usbd_deinitialize */
     USBD_EVENT_UNKNOWN
@@ -57,6 +63,15 @@ typedef int (*usbd_request_handler)(uint8_t busid, struct usb_setup_packet *setu
 typedef void (*usbd_endpoint_callback)(uint8_t busid, uint8_t ep, uint32_t nbytes);
 typedef void (*usbd_notify_handler)(uint8_t busid, uint8_t event, void *arg);
 typedef void (*usbd_event_handler_t)(uint8_t busid, uint8_t event);
+
+struct usbd_endpoint_info {
+    uint8_t ep_type;
+    uint8_t ep_mult;
+    uint16_t ep_mps;
+    uint8_t ep_interval;
+    uint8_t ep_maxburst;
+    uint8_t ep_maxstream;
+};
 
 struct usbd_endpoint {
     uint8_t ep_addr;
@@ -88,6 +103,9 @@ struct usb_descriptor {
 struct usbd_bus {
     uint8_t busid;
     uintptr_t reg_base;
+#if defined(CONFIG_USBDEV_MULT_DC)
+    const struct usbd_dc_driver *driver;
+#endif
 };
 
 extern struct usbd_bus g_usbdev_bus[];
@@ -101,13 +119,18 @@ void usbd_desc_register(uint8_t busid, const struct usb_descriptor *desc);
 void usbd_add_interface(uint8_t busid, struct usbd_interface *intf);
 void usbd_add_endpoint(uint8_t busid, struct usbd_endpoint *ep);
 
+uint8_t usbd_get_device_speed(uint8_t busid);
 uint16_t usbd_get_ep_mps(uint8_t busid, uint8_t ep);
 uint8_t usbd_get_ep_mult(uint8_t busid, uint8_t ep);
+int usbd_get_ep_info(uint8_t busid, uint8_t ep, struct usbd_endpoint_info *ep_info);
 bool usb_device_is_configured(uint8_t busid);
 bool usb_device_is_suspend(uint8_t busid);
 int usbd_send_remote_wakeup(uint8_t busid);
 uint8_t usbd_get_ep0_next_state(uint8_t busid);
 
+#if defined(CONFIG_USBDEV_MULT_DC)
+void usbd_register_dc_driver(uint8_t busid, const struct usbd_dc_driver *driver);
+#endif
 int usbd_initialize(uint8_t busid, uintptr_t reg_base, usbd_event_handler_t event_handler);
 int usbd_deinitialize(uint8_t busid);
 

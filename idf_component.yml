@@ -1,4 +1,4 @@
-version: "1.5.3"
+version: "1.6.1"
 description: CherryUSB is a tiny and portable USB Stack (device & host) for embedded system with USB IP
 tags:
   - usb
@@ -23,3 +23,5 @@ targets:
   - esp32s2
   - esp32s3
   - esp32p4
+  - esp32s31
+  - esp32h4

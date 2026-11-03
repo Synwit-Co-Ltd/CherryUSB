@@ -133,6 +133,8 @@ static dcd_data_t *g_dcd_data[CONFIG_USBDEV_MAX_BUS] = {
 #endif
 };
 
+static uint8_t _setup_data[8];
+
 /* Index to bit position in register */
 static inline uint8_t ep_idx2bit(uint8_t ep_idx)
 {
@@ -438,13 +440,8 @@ static bool chipidea_start_xfer(uint8_t busid, uint8_t ep_addr, uint8_t *buffer,
     return true;
 }
 
-__WEAK void usb_dc_low_level_init(uint8_t busid)
-{
-}
-
-__WEAK void usb_dc_low_level_deinit(uint8_t busid)
-{
-}
+extern void usb_dc_low_level_init(uint8_t busid);
+extern void usb_dc_low_level_deinit(uint8_t busid);
 
 int usb_dc_init(uint8_t busid)
 {
@@ -660,6 +657,7 @@ void USBD_IRQHandler(uint8_t busid)
         memset(g_chipidea_udc[busid].out_ep, 0, sizeof(struct chipidea_ep_state) * CONFIG_USBDEV_EP_NUM);
         usbd_event_reset_handler(busid);
         chipidea_bus_reset(busid, g_chipidea_udc[busid].in_ep[0].ep_mps);
+        return;
     }
 
     if (int_status & intr_suspend) {
@@ -722,7 +720,7 @@ void USBD_IRQHandler(uint8_t busid)
                         if (ep_addr & 0x80) {
                             usbd_event_ep_in_complete_handler(busid, ep_addr, transfer_len);
                         } else {
-                            usb_dcache_invalidate((uintptr_t)g_chipidea_udc[busid].out_ep[ep_idx].xfer_buf, USB_ALIGN_UP(transfer_len, CONFIG_USB_ALIGN_SIZE));
+                            usb_dcache_invalidate((uintptr_t)g_chipidea_udc[busid].out_ep[ep_idx / 2].xfer_buf, USB_ALIGN_UP(transfer_len, CONFIG_USB_ALIGN_SIZE));
                             usbd_event_ep_out_complete_handler(busid, ep_addr, transfer_len);
                         }
                     }
@@ -734,7 +732,12 @@ void USBD_IRQHandler(uint8_t busid)
             /*------------- Set up Received -------------*/
             USB_OTG_DEV->ENDPTSETUPSTAT = edpt_setup_status;
             dcd_qhd_t *qhd0 = chipidea_qhd_get(busid, 0);
-            usbd_event_ep0_setup_complete_handler(busid, (uint8_t *)&qhd0->setup_request);
+            do {
+                USB_OTG_DEV->USBCMD |= USB_USBCMD_SUTW_MASK;
+                memcpy(_setup_data, (uint8_t *)(&qhd0->setup_request), 8);
+            } while (!USB_USBCMD_SUTW_GET(USB_OTG_DEV->USBCMD));
+            USB_OTG_DEV->USBCMD &= ~USB_USBCMD_SUTW_MASK;
+            usbd_event_ep0_setup_complete_handler(busid, _setup_data);
         }
     }
 }

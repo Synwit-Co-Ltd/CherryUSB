@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, sakumisu
+ * Copyright (c) 2025-2026 sakumisu
  *
  * SPDX-License-Identifier: Apache-2.0
  */
@@ -27,7 +27,6 @@ usb_osal_thread_t usb_osal_thread_create(const char *name, uint32_t stack_size, 
     k_thread_stack_t *stack = (k_thread_stack_t *)thread;
 
     if (thread == NULL) {
-        USB_LOG_ERR("Create thread faild\r\n");
         return NULL;
     }
 
@@ -49,8 +48,12 @@ usb_osal_thread_t usb_osal_thread_create(const char *name, uint32_t stack_size, 
 static void release_thread_handler(struct k_work *work)
 {
     struct release_thread_work *release_work = (struct release_thread_work *)work;
-    k_free(release_work->thread);
-    k_work_cancel(work);
+
+    /* The workqueue may preempt the thread that queued this work. Wait until
+     * k_thread_abort() has completed before freeing its TCB and stack. */
+    if (k_thread_join(release_work->thread, K_FOREVER) == 0) {
+        k_free(release_work->thread);
+    }
     k_free(release_work);
 }
 
@@ -64,6 +67,10 @@ void usb_osal_thread_delete(usb_osal_thread_t thread)
         thread = z_current_get();
 #endif
         release_work = k_malloc(sizeof(struct release_thread_work));
+        if (release_work == NULL) {
+            k_thread_abort(thread);
+            return;
+        }
         release_work->thread = thread;
         k_work_init(&release_work->work, release_thread_handler);
         k_work_submit(&release_work->work);
@@ -96,10 +103,22 @@ usb_osal_sem_t usb_osal_sem_create(uint32_t initial_count)
 
     sem = k_malloc(sizeof(struct k_sem));
     if (sem == NULL) {
-        USB_LOG_ERR("Create semaphore faild\r\n");
         return NULL;
     }
     k_sem_init(sem, initial_count, 1);
+
+    return (usb_osal_sem_t)sem;
+}
+
+usb_osal_sem_t usb_osal_sem_create_counting(uint32_t max_count)
+{
+    struct k_sem *sem;
+
+    sem = k_malloc(sizeof(struct k_sem));
+    if (sem == NULL) {
+        return NULL;
+    }
+    k_sem_init(sem, 0, max_count);
 
     return (usb_osal_sem_t)sem;
 }
@@ -139,7 +158,6 @@ usb_osal_mutex_t usb_osal_mutex_create(void)
 
     mutex = k_malloc(sizeof(struct k_mutex));
     if (mutex == NULL) {
-        USB_LOG_ERR("Create mutex faild\r\n");
         return NULL;
     }
     k_mutex_init(mutex);
@@ -168,10 +186,10 @@ usb_osal_mq_t usb_osal_mq_create(uint32_t max_msgs)
 
     msgq = k_malloc(sizeof(struct k_msgq));
     if (msgq == NULL) {
-        USB_LOG_ERR("Create message queue faild\r\n");
         return NULL;
     }
     if (k_msgq_alloc_init(msgq, sizeof(uintptr_t), max_msgs) != 0) {
+        k_free(msgq);
         return NULL;
     }
 
@@ -234,14 +252,13 @@ struct usb_osal_timer *usb_osal_timer_create(const char *name, uint32_t timeout_
 
     timer = k_malloc(sizeof(struct usb_osal_timer));
     if (timer == NULL) {
-        USB_LOG_ERR("Create timer faild\r\n");
         return NULL;
     }
     memset(timer, 0, sizeof(struct usb_osal_timer));
 
     timer->timer = k_malloc(sizeof(struct k_timer));
     if (timer->timer == NULL) {
-        USB_LOG_ERR("Create timer faild\r\n");
+        k_free(timer);
         return NULL;
     }
 

@@ -654,11 +654,27 @@ struct audio_cs_if_ac_selector_unit_descriptor {
     uint8_t bDescriptorSubtype;
     uint8_t bUnitID;
     uint8_t bNrInPins;
-    uint8_t baSourceID[1];
+    uint8_t baSourceID[2];
     uint8_t iSelector;
 } __PACKED;
 
 #define AUDIO_SIZEOF_AC_SELECTOR_UNIT_DESC(bNrInPins) (6 + (bNrInPins))
+
+struct audio_cs_if_ac_mixer_unit_descriptor {
+    uint8_t bLength;
+    uint8_t bDescriptorType;
+    uint8_t bDescriptorSubtype;
+    uint8_t bUnitID;
+    uint8_t bNrInPins;
+    uint8_t baSourceID[2];
+    uint8_t bNrChannels;
+    uint16_t wChannelConfig;
+    uint8_t iChannelNames;
+    uint8_t bmControls;
+    uint8_t iMixer;
+} __PACKED;
+
+#define AUDIO_SIZEOF_AC_MIXER_UNIT_DESC(bNrInPins) (11 + (bNrInPins))
 
 struct audio_cs_if_as_general_descriptor {
     uint8_t bLength;
@@ -671,6 +687,10 @@ struct audio_cs_if_as_general_descriptor {
 
 #define AUDIO_SIZEOF_AS_GENERAL_DESC (7)
 
+#ifndef CONFIG_USBHOST_AUDIO_MAX_SAMPLE_FREQ_NUM
+#define CONFIG_USBHOST_AUDIO_MAX_SAMPLE_FREQ_NUM 8
+#endif
+
 struct audio_cs_if_as_format_type_descriptor {
     uint8_t bLength;
     uint8_t bDescriptorType;
@@ -680,7 +700,7 @@ struct audio_cs_if_as_format_type_descriptor {
     uint8_t bSubframeSize;
     uint8_t bBitResolution;
     uint8_t bSamFreqType;
-    uint8_t tSamFreq[3];
+    uint8_t tSamFreq[3 * CONFIG_USBHOST_AUDIO_MAX_SAMPLE_FREQ_NUM];
 } __PACKED;
 
 #define AUDIO_SIZEOF_FORMAT_TYPE_DESC(bSamFreqType) (8 + 3 * (bSamFreqType))
@@ -1318,29 +1338,37 @@ struct audio_v2_control_range3_param_block {
 
 // clang-format on
 
-#define AUDIO_V2_AS_DESCRIPTOR_LEN            (0x09 + 0x09 + 0x10 + 0x06 + 0x07 + 0x08)
+#define AUDIO_V2_AS_DESCRIPTOR_LEN             (0x09 + 0x09 + 0x10 + 0x06 + 0x07 + 0x08)
 #define AUDIO_V2_AS_ALTSETTING0_DESCRIPTOR_LEN (0x09)
-#define AUDIO_V2_AS_ALTSETTING_DESCRIPTOR_LEN (0x09 + 0x10 + 0x06 + 0x07 + 0x08)
-#define AUDIO_V2_AS_FEEDBACK_DESCRIPTOR_LEN   (0x09 + 0x09 + 0x10 + 0x06 + 0x07 + 0x08 + 0x07)
+#define AUDIO_V2_AS_ALTSETTING_DESCRIPTOR_LEN  (0x09 + 0x10 + 0x06 + 0x07 + 0x08)
+#define AUDIO_V2_AS_FEEDBACK_DESCRIPTOR_LEN    (0x09 + 0x09 + 0x10 + 0x06 + 0x07 + 0x08 + 0x07)
 
 #define AUDIO_SAMPLE_FREQ_NUM(num) (uint8_t)(num), (uint8_t)((num >> 8))
 #define AUDIO_SAMPLE_FREQ_3B(frq)  (uint8_t)(frq), (uint8_t)((frq >> 8)), (uint8_t)((frq >> 16))
 #define AUDIO_SAMPLE_FREQ_4B(frq)  (uint8_t)(frq), (uint8_t)((frq >> 8)), \
                                   (uint8_t)((frq >> 16)), (uint8_t)((frq >> 24))
 
-/* format 10.14 */
-#define AUDIO_FREQ_TO_FEEDBACK_FS(freq) ((freq << 10) / 1000)
-#define AUDIO_FEEDBACK_TO_BUF_FS(buf, feedback) \
-    buf[0] = ((feedback << 4) & 0xFFU);         \
-    buf[1] = (((feedback << 4) >> 8U) & 0xFFU); \
-    buf[2] = (((feedback << 4) >> 16U) & 0xFFU)
+/* FS feedback uses 10.14 samples per audio data service interval. */
+#define AUDIO_FREQ_TO_FEEDBACK_FS(freq) ((uint32_t)(((uint64_t)(freq) << 10U) / 1000U))
+#define AUDIO_FEEDBACK_TO_FREQ_FS(feedback) ((uint32_t)(((uint64_t)(feedback) * 1000U) >> 10U))
+#define AUDIO_FEEDBACK_TO_BUF_FS_INTERVAL(buf, feedback, interval) do {                         \
+    uint32_t audio_feedback_value = (uint32_t)((uint64_t)(feedback) << ((interval) + 3U));      \
+    (buf)[0] = (uint8_t)(audio_feedback_value);                                                  \
+    (buf)[1] = (uint8_t)(audio_feedback_value >> 8U);                                            \
+    (buf)[2] = (uint8_t)(audio_feedback_value >> 16U);                                           \
+} while (0)
+#define AUDIO_FEEDBACK_TO_BUF_FS(buf, feedback) AUDIO_FEEDBACK_TO_BUF_FS_INTERVAL(buf, feedback, 1U)
 
-/* format 16.16 */
-#define AUDIO_FREQ_TO_FEEDBACK_HS(freq) ((freq << 13) / 1000)
-#define AUDIO_FEEDBACK_TO_BUF_HS(buf, feedback)                \
-    buf[0] = (((feedback & 0x00001FFFu) << 3) & 0xFFu);        \
-    buf[1] = ((((feedback & 0x00001FFFu) << 3) >> 8) & 0xFFu); \
-    buf[2] = (((feedback & 0x01FFE000u) >> 13) & 0xFFu);       \
-    buf[3] = (((feedback & 0x01FFE000u) >> 21) & 0xFFu)
+/* Keep HS feedback in 16.16 samples per microframe, then scale it by the audio data endpoint interval when serialized. */
+#define AUDIO_FREQ_TO_FEEDBACK_HS(freq) ((uint32_t)(((uint64_t)(freq) << 16U) / 8000U))
+#define AUDIO_FEEDBACK_TO_FREQ_HS(feedback) ((uint32_t)(((uint64_t)(feedback) * 8000U) >> 16U))
+#define AUDIO_FEEDBACK_TO_BUF_HS_INTERVAL(buf, feedback, interval) do {                         \
+    uint32_t audio_feedback_value = (uint32_t)((uint64_t)(feedback) << ((interval) - 1U));      \
+    (buf)[0] = (uint8_t)(audio_feedback_value);                                                  \
+    (buf)[1] = (uint8_t)(audio_feedback_value >> 8U);                                            \
+    (buf)[2] = (uint8_t)(audio_feedback_value >> 16U);                                           \
+    (buf)[3] = (uint8_t)(audio_feedback_value >> 24U);                                           \
+} while (0)
+#define AUDIO_FEEDBACK_TO_BUF_HS(buf, feedback) AUDIO_FEEDBACK_TO_BUF_HS_INTERVAL(buf, feedback, 4U)
 
 #endif /* USB_AUDIO_H */

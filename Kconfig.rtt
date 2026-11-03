@@ -64,8 +64,6 @@ if RT_USING_CHERRYUSB
                 bool "chipidea_custom"
             config RT_CHERRYUSB_DEVICE_KINETIS_MCX
                 bool "kinetis_mcx"
-            config RT_CHERRYUSB_DEVICE_KINETIS_MM32
-                bool "kinetis_mm32"
             config RT_CHERRYUSB_DEVICE_KINETIS_CUSTOM
                 bool "kinetis_custom"
             config RT_CHERRYUSB_DEVICE_BL
@@ -76,8 +74,14 @@ if RT_USING_CHERRYUSB
                 bool "aic"
             config RT_CHERRYUSB_DEVICE_RP2040
                 bool "rp2040"
-            config RT_CHERRYUSB_DEVICE_CH32
-                bool "ch32"
+            config RT_CHERRYUSB_DEVICE_RENESAS
+                bool "renesas"
+            config RT_CHERRYUSB_DEVICE_CH32_USBFS
+                bool "ch32_usbfs"
+            config RT_CHERRYUSB_DEVICE_CH32_USBHS
+                bool "ch32_usbhs"
+            config RT_CHERRYUSB_DEVICE_CH32_USBSS
+                bool "ch32_usbss"
             config RT_CHERRYUSB_DEVICE_PUSB2
                 bool "pusb2"
             config RT_CHERRYUSB_DEVICE_NRF5X
@@ -134,15 +138,48 @@ if RT_USING_CHERRYUSB
             prompt "Enable usb adb device"
             default n
 
+        config RT_CHERRYUSB_DEVICE_ADB_SYNC
+            bool
+            prompt "Enable usb adb sync service"
+            default n
+            select RT_USING_DFS
+            select RT_USING_DFS_ELMFAT
+            select DFS_USING_POSIX
+
         config RT_CHERRYUSB_DEVICE_DFU
             bool
             prompt "Enable usb dfu device"
+            default n
+
+        config RT_CHERRYUSB_DEVICE_DISPLAY
+            bool
+            prompt "Enable usb display device"
+            default n
+
+        config RT_CHERRYUSB_DEVICE_TMC
+            bool
+            prompt "Enable usb tmc device"
+            default n
+
+        config RT_CHERRYUSB_DEVICE_GS_USB
+            bool
+            prompt "Enable usb gs_usb device"
             default n
 
         config RT_CHERRYUSB_DEVICE_CDC_ACM_CHARDEV
             bool
             prompt "Enable chardev for cdc acm device"
             default n
+
+        config RT_CHERRYUSB_DEVICE_MSC_BLKDEV
+            bool
+            prompt "Enable blkdev for msc device"
+            default n
+
+        config CONFIG_USBDEV_MSC_BLOCK_DEV_NAME
+            string "usb device msc block device name"
+            depends on RT_CHERRYUSB_DEVICE_MSC_BLKDEV
+            default "sd0"
 
         config CONFIG_USBDEV_REQUEST_BUFFER_LEN
             int
@@ -184,7 +221,7 @@ if RT_USING_CHERRYUSB
             config RT_CHERRYUSB_DEVICE_TEMPLATE_MSC_BLKDEV
                 bool
                 prompt "msc_blkdev"
-                depends on RT_CHERRYUSB_DEVICE_MSC
+                depends on RT_CHERRYUSB_DEVICE_MSC && RT_CHERRYUSB_DEVICE_MSC_BLKDEV
             config RT_CHERRYUSB_DEVICE_TEMPLATE_HID_KEYBOARD
                 bool
                 prompt "hid_keyboard"
@@ -221,6 +258,10 @@ if RT_USING_CHERRYUSB
                 bool
                 prompt "cdc_ncm"
                 depends on RT_CHERRYUSB_DEVICE_CDC_NCM
+            config RT_CHERRYUSB_DEVICE_TEMPLATE_DFU
+                bool
+                prompt "dfu"
+                depends on RT_CHERRYUSB_DEVICE_DFU
             config RT_CHERRYUSB_DEVICE_TEMPLATE_CDC_ACM_MSC
                 bool
                 prompt "cdc_acm_msc"
@@ -243,6 +284,10 @@ if RT_USING_CHERRYUSB
                 bool
                 prompt "webusb_hid"
                 depends on RT_CHERRYUSB_DEVICE_HID
+            config RT_CHERRYUSB_DEVICE_TEMPLATE_DISPLAY
+                bool
+                prompt "display"
+                depends on RT_CHERRYUSB_DEVICE_DISPLAY
             config RT_CHERRYUSB_DEVICE_TEMPLATE_ADB
                 bool
                 prompt "adb"
@@ -252,11 +297,6 @@ if RT_USING_CHERRYUSB
                 prompt "cdc_acm_chardev"
                 depends on RT_CHERRYUSB_DEVICE_CDC_ACM_CHARDEV
         endchoice
-
-        config CONFIG_USBDEV_MSC_BLOCK_DEV_NAME
-            string "usb device msc block device name"
-            depends on RT_CHERRYUSB_DEVICE_TEMPLATE_MSC_BLKDEV
-            default "sd0"
 
     endif
 
@@ -278,10 +318,6 @@ if RT_USING_CHERRYUSB
                 bool "ehci_aic"
             config RT_CHERRYUSB_HOST_EHCI_MCX
                 bool "ehci_mcx"
-            config RT_CHERRYUSB_HOST_EHCI_NUC980
-                bool "ehci_nuc980"
-            config RT_CHERRYUSB_HOST_EHCI_MA35D0
-                bool "ehci_ma35d0"
             config RT_CHERRYUSB_HOST_EHCI_CUSTOM
                 bool "ehci_custom"
             config RT_CHERRYUSB_HOST_DWC2_ST
@@ -316,6 +352,12 @@ if RT_USING_CHERRYUSB
                 bool "xhci"
             config RT_CHERRYUSB_HOST_RP2040
                 bool "rp2040"
+            config RT_CHERRYUSB_HOST_CH32_USBFS
+                bool "ch32_usbfs"
+            config RT_CHERRYUSB_HOST_CH32_USBHS
+                bool "ch32_usbhs"
+            config RT_CHERRYUSB_HOST_CH32_USBSS
+                bool "ch32_usbss"
         endchoice
 
         config RT_CHERRYUSB_HOST_CDC_ACM

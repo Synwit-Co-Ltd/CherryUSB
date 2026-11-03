@@ -36,6 +36,20 @@
 #define GET_USB_PHY_TARGET(reg_base)    ((reg_base) == (void*)ESP_USB_HS0_BASE ? USB_PHY_TARGET_UTMI : USB_PHY_TARGET_INT)
 #undef GET_USB_PHY_SPEED
 #define GET_USB_PHY_SPEED(reg_base)    ((reg_base) == (void*)ESP_USB_HS0_BASE ? USB_PHY_SPEED_HIGH : USB_PHY_SPEED_FULL)
+#elif CONFIG_IDF_TARGET_ESP32S31
+#define DEFAULT_CPU_FREQ_MHZ    CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
+#define DEFAULT_USB_INTR_SOURCE ETS_USB_OTGHS_INTR_SOURCE
+#undef GET_USB_INTR_SOURCE
+#define GET_USB_INTR_SOURCE(reg_base)   DEFAULT_USB_INTR_SOURCE
+#undef GET_USB_PHY_TARGET
+#define GET_USB_PHY_TARGET(reg_base)    USB_PHY_TARGET_UTMI
+#undef GET_USB_PHY_SPEED
+#define GET_USB_PHY_SPEED(reg_base)     USB_PHY_SPEED_HIGH
+#elif CONFIG_IDF_TARGET_ESP32H4
+#define DEFAULT_CPU_FREQ_MHZ    CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ
+#define DEFAULT_USB_INTR_SOURCE ETS_USB_OTG11_INTR_SOURCE
+#undef GET_USB_INTR_SOURCE
+#define GET_USB_INTR_SOURCE(reg_base)   DEFAULT_USB_INTR_SOURCE
 #else
 #define DEFAULT_CPU_FREQ_MHZ 160
 #endif
@@ -44,7 +58,7 @@ uint32_t SystemCoreClock = (DEFAULT_CPU_FREQ_MHZ * 1000 * 1000);
 static usb_phy_handle_t s_phy_handle[SOC_USB_OTG_PERIPH_NUM] = {NULL};
 static intr_handle_t s_interrupt_handle[SOC_USB_OTG_PERIPH_NUM] = {NULL};
 
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32H4
 const struct dwc2_user_params param_fs = {
     .phy_type = DWC2_PHY_TYPE_PARAM_FS,
     .device_dma_enable = true,
@@ -72,6 +86,35 @@ const struct dwc2_user_params param_fs = {
     .host_rx_fifo_size = 80,
     .host_nperio_tx_fifo_size = 60, // 240 byte
     .host_perio_tx_fifo_size = 60,  // 240 byte
+};
+#elif CONFIG_IDF_TARGET_ESP32S31
+const struct dwc2_user_params param_hs = {
+    .phy_type = DWC2_PHY_TYPE_PARAM_UTMI,
+    .device_dma_enable = true,
+    .device_dma_desc_enable = false,
+    .device_rx_fifo_size = (896 - 16 - 128 - 128 - 128 - 128 - 16 - 16),
+    .device_tx_fifo_size = {
+        [0] = 16,  // 64 byte
+        [1] = 128, // 512 byte
+        [2] = 128, // 512 byte
+        [3] = 128, // 512 byte
+        [4] = 128, // 512 byte
+        [5] = 16,  // 64 byte
+        [6] = 16,  // 64 byte
+        [7] = 0,
+        [8] = 0,
+        [9] = 0,
+        [10] = 0,
+        [11] = 0,
+        [12] = 0,
+        [13] = 0,
+        [14] = 0,
+        [15] = 0 },
+
+    .host_dma_desc_enable = false,
+    .host_rx_fifo_size = (896 - 128 - 128),
+    .host_nperio_tx_fifo_size = 128, // 512 byte
+    .host_perio_tx_fifo_size = 128,  // 512 byte
 };
 #elif CONFIG_IDF_TARGET_ESP32P4
 const struct dwc2_user_params param_fs = {
@@ -235,7 +278,7 @@ void usb_hc_low_level_deinit(struct usbh_bus *bus)
 
 void dwc2_get_user_params(uint32_t reg_base, struct dwc2_user_params *params)
 {
-#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3
+#if CONFIG_IDF_TARGET_ESP32S2 || CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32H4
     memcpy(params, &param_fs, sizeof(struct dwc2_user_params));
 #elif CONFIG_IDF_TARGET_ESP32P4
     if (reg_base == ESP_USB_HS0_BASE) {
@@ -243,6 +286,8 @@ void dwc2_get_user_params(uint32_t reg_base, struct dwc2_user_params *params)
     } else {
         memcpy(params, &param_fs, sizeof(struct dwc2_user_params));
     }
+#elif CONFIG_IDF_TARGET_ESP32S31
+    memcpy(params, &param_hs, sizeof(struct dwc2_user_params));
 #endif
 #ifdef CONFIG_USB_DWC2_CUSTOM_FIFO
     struct usb_dwc2_user_fifo_config s_dwc2_fifo_config;

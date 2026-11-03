@@ -16,6 +16,15 @@
 
 #define USB_BASE (bus->hcd.reg_base)
 
+#if defined(CONFIG_USB_MUSB_SIFLI) && (defined(SF32LB52X) || defined(SF32LB56X))
+#define MUSB_SIFLI_EP_MAP
+/* Host channel/slot layout: IN pool = ch1..ch4, OUT pool = ch5..ch7
+ * (ch0 is reserved for EP0). */
+#define MUSB_IN_SLOT_NUM  (4)
+#define MUSB_OUT_SLOT_NUM (3)
+#define MUSB_EP_SLOT_NUM  (MUSB_IN_SLOT_NUM + MUSB_OUT_SLOT_NUM)
+#endif
+
 #if defined(CONFIG_USB_MUSB_SUNXI)
 #define MUSB_FADDR_OFFSET 0x98
 #define MUSB_POWER_OFFSET 0x40
@@ -169,6 +178,9 @@ struct musb_hcd {
     volatile bool port_pec;
     volatile bool port_pe;
     struct musb_pipe pipe_pool[CONFIG_USB_MUSB_PIPE_NUM];
+#ifdef MUSB_SIFLI_EP_MAP
+    uint8_t sifli_ep_map[MUSB_EP_SLOT_NUM]; /* slot layout: 0-3 = IN (ch1..ch4), 4-6 = OUT (ch5..ch7) */
+#endif
 } g_musb_hcd[CONFIG_USBHOST_MAX_BUS];
 
 /* get current active ep */
@@ -188,14 +200,14 @@ static void musb_fifo_flush(struct usbh_bus *bus, uint8_t ep)
     uint8_t ep_idx = ep & 0x7f;
     if (ep_idx == 0) {
         if ((HWREGB(USB_TXCSRL_BASE(ep_idx)) & (USB_CSRL0_RXRDY | USB_CSRL0_TXRDY)) != 0)
-            HWREGB(USB_RXCSRL_BASE(ep_idx)) |= USB_CSRH0_FLUSH;
+            HWREGB(USB_TXCSRH_BASE(ep_idx)) |= USB_CSRH0_FLUSH;
     } else {
         if (ep & 0x80) {
-            if (HWREGB(USB_TXCSRL_BASE(ep_idx)) & USB_TXCSRL1_TXRDY)
-                HWREGB(USB_TXCSRL_BASE(ep_idx)) |= USB_TXCSRL1_FLUSH;
-        } else {
             if (HWREGB(USB_RXCSRL_BASE(ep_idx)) & USB_RXCSRL1_RXRDY)
                 HWREGB(USB_RXCSRL_BASE(ep_idx)) |= USB_RXCSRL1_FLUSH;
+        } else {
+            if (HWREGB(USB_TXCSRL_BASE(ep_idx)) & USB_TXCSRL1_TXRDY)
+                HWREGB(USB_TXCSRL_BASE(ep_idx)) |= USB_TXCSRL1_FLUSH;
         }
     }
 }
@@ -338,6 +350,8 @@ void musb_control_urb_init(struct usbh_bus *bus, uint8_t chidx, struct usbh_urb 
     HWREGB(USB_TXHUBADDR_BASE(chidx)) = 0;
     HWREGB(USB_TXHUBPORT_BASE(chidx)) = 0;
 #endif
+
+    HWREGH(USB_BASE + MUSB_TXIE_OFFSET) |= USB_TXIE_EP0;
 
     musb_write_packet(bus, chidx, (uint8_t *)setup, 8);
     HWREGB(USB_TXCSRL_BASE(chidx)) = USB_CSRL0_TXRDY | USB_CSRL0_SETUP;
@@ -493,18 +507,15 @@ int musb_intr_urb_init(struct usbh_bus *bus, uint8_t chidx, struct usbh_urb *urb
 static int usbh_reset_port(struct usbh_bus *bus, const uint8_t port)
 {
     g_musb_hcd[bus->hcd.hcd_id].port_pe = 0;
-    HWREGB(USB_BASE + MUSB_POWER_OFFSET) |= USB_POWER_RESET;
 
 #ifdef CONFIG_USB_MUSB_SIFLI
-    extern void musb_reset_prev(void);
-    musb_reset_prev();
-#endif
-    usb_osal_msleep(20);
+    extern void musb_sifli_reset_port(struct usbh_bus *bus);
+    musb_sifli_reset_port(bus);
+#else
+    HWREGB(USB_BASE + MUSB_POWER_OFFSET) |= USB_POWER_RESET;
+    usb_osal_msleep(200);
     HWREGB(USB_BASE + MUSB_POWER_OFFSET) &= ~(USB_POWER_RESET);
     usb_osal_msleep(20);
-#ifdef CONFIG_USB_MUSB_SIFLI
-    extern void musb_reset_post(void);
-    musb_reset_post();
 #endif
     g_musb_hcd[bus->hcd.hcd_id].port_pe = 1;
     return 0;
@@ -542,11 +553,67 @@ static int musb_pipe_alloc(struct usbh_bus *bus)
     return -1;
 }
 
+#ifdef MUSB_SIFLI_EP_MAP
+static int sifli_ep_map_take_slot(struct musb_hcd *hcd, uint8_t map_base, uint8_t ch_base, uint8_t ep_num)
+{
+    uint8_t slot_cnt = (map_base == 0U) ? MUSB_IN_SLOT_NUM : MUSB_OUT_SLOT_NUM;
+
+    for (uint8_t i = 0; i < slot_cnt; i++) {
+        uint8_t *slot = &hcd->sifli_ep_map[map_base + i];
+
+        if (*slot == 0xFF) {
+            *slot = ep_num;
+            return ch_base + i;
+        }
+    }
+
+    return -USB_ERR_RANGE;
+}
+
+static int sifli_ep_map_alloc(struct usbh_bus *bus, uint8_t ep_num, bool is_in)
+{
+    if (ep_num == 0U) {
+        return ep_num;
+    }
+
+    struct musb_hcd *hcd = &g_musb_hcd[bus->hcd.hcd_id];
+    uint8_t map_base = is_in ? 0 : MUSB_IN_SLOT_NUM;
+    uint8_t ch_base = is_in ? 1 : (1 + MUSB_IN_SLOT_NUM);
+    uint8_t slot_cnt = is_in ? MUSB_IN_SLOT_NUM : MUSB_OUT_SLOT_NUM;
+
+    for (uint8_t i = 0; i < slot_cnt; i++) {
+        if (hcd->sifli_ep_map[map_base + i] == ep_num) {
+            return ch_base + i;
+        }
+    }
+
+    return sifli_ep_map_take_slot(hcd, map_base, ch_base, ep_num);
+}
+
+static void sifli_ep_map_free(struct usbh_bus *bus, uint8_t chidx)
+{
+    if (chidx < 1 || chidx > MUSB_EP_SLOT_NUM) {
+        return;
+    }
+
+    struct musb_hcd *hcd = &g_musb_hcd[bus->hcd.hcd_id];
+    uint8_t idx = chidx - 1;
+
+    hcd->sifli_ep_map[idx] = 0xFF;
+}
+#endif
+
 static void musb_pipe_free(struct musb_pipe *pipe)
 {
     uintptr_t flags;
 
     flags = usb_osal_enter_critical_section();
+#ifdef MUSB_SIFLI_EP_MAP
+    if (pipe->urb && pipe->urb->ep && pipe->urb->hport && pipe->urb->hport->bus &&
+        (USB_GET_ENDPOINT_TYPE(pipe->urb->ep->bmAttributes) != USB_ENDPOINT_TYPE_CONTROL)) {
+        sifli_ep_map_free(pipe->urb->hport->bus, pipe->chidx);
+    }
+#endif
     if (pipe->urb) {
         pipe->urb->hcpriv = NULL;
         pipe->urb = NULL;
@@ -556,15 +623,8 @@ static void musb_pipe_free(struct musb_pipe *pipe)
     usb_osal_leave_critical_section(flags);
 }
 
-__WEAK void usb_hc_low_level_init(struct usbh_bus *bus)
-{
-    (void)bus;
-}
-
-__WEAK void usb_hc_low_level_deinit(struct usbh_bus *bus)
-{
-    (void)bus;
-}
+extern void usb_hc_low_level_init(struct usbh_bus *bus);
+extern void usb_hc_low_level_deinit(struct usbh_bus *bus);
 
 int usb_hc_init(struct usbh_bus *bus)
 {
@@ -577,8 +637,15 @@ int usb_hc_init(struct usbh_bus *bus)
 
     memset(&g_musb_hcd[bus->hcd.hcd_id], 0, sizeof(struct musb_hcd));
 
+#ifdef MUSB_SIFLI_EP_MAP
+    for (uint8_t i = 0; i < MUSB_EP_SLOT_NUM; i++) {
+        g_musb_hcd[bus->hcd.hcd_id].sifli_ep_map[i] = 0xFF;
+    }
+#endif
+
     for (uint8_t i = 0; i < CONFIG_USB_MUSB_PIPE_NUM; i++) {
         g_musb_hcd[bus->hcd.hcd_id].pipe_pool[i].waitsem = usb_osal_sem_create(0);
+        USB_ASSERT(g_musb_hcd[bus->hcd.hcd_id].pipe_pool[i].waitsem != NULL);
     }
 
     cfg_num = usbh_get_musb_fifo_cfg(&cfg);
@@ -769,10 +836,44 @@ int usbh_submit_urb(struct usbh_urb *urb)
     if (USB_GET_ENDPOINT_TYPE(urb->ep->bmAttributes) == USB_ENDPOINT_TYPE_CONTROL) {
         chidx = 0;
     } else {
+#ifdef MUSB_SIFLI_EP_MAP
+        bool in = (urb->ep->bEndpointAddress & 0x80) ? true : false;
+        uint8_t ep_num = (urb->ep->bEndpointAddress & 0x0f);
+        size_t alloc_flags;
+
+        alloc_flags = usb_osal_enter_critical_section();
+        chidx = sifli_ep_map_alloc(bus, ep_num, in);
+        USB_LOG_DBG("sifli_ep_map_alloc: ep_num=%d, in=%d, chidx=%d\r\n", ep_num, in, chidx);
+        if (chidx >= 0) {
+            if (g_musb_hcd[bus->hcd.hcd_id].pipe_pool[chidx].inuse) {
+                struct usbh_urb *owner = g_musb_hcd[bus->hcd.hcd_id].pipe_pool[chidx].urb;
+
+                USB_LOG_ERR("MUSB busy req=0x%02x %s ch=%d owner=0x%02x %s\r\n",
+                            urb->ep->bEndpointAddress,
+                            in ? "IN" : "OUT",
+                            chidx,
+                            owner && owner->ep ? owner->ep->bEndpointAddress : 0,
+                            owner && owner->ep && (owner->ep->bEndpointAddress & 0x80) ? "IN" : "OUT");
+                chidx = -USB_ERR_BUSY;
+            } else {
+                g_musb_hcd[bus->hcd.hcd_id].pipe_pool[chidx].inuse = true;
+            }
+        } else {
+            USB_LOG_ERR("MUSB map fail ep=0x%02x %s ret=%d\r\n",
+                        urb->ep->bEndpointAddress,
+                        in ? "IN" : "OUT",
+                        chidx);
+        }
+        usb_osal_leave_critical_section(alloc_flags);
+        if (chidx < 0) {
+            return chidx;
+        }
+#else
         chidx = musb_pipe_alloc(bus);
         if (chidx == -1) {
             return -USB_ERR_NOMEM;
         }
+#endif
     }
 
     flags = usb_osal_enter_critical_section();
@@ -846,17 +947,32 @@ int usbh_kill_urb(struct usbh_urb *urb)
     flags = usb_osal_enter_critical_section();
 
     pipe = (struct musb_pipe *)urb->hcpriv;
-    urb->errorcode = -USB_ERR_SHUTDOWN;
-
-    if (urb->ep->bEndpointAddress & 0x80) {
-        HWREGH(USB_BASE + MUSB_RXIE_OFFSET) &= ~(1 << (urb->ep->bEndpointAddress & 0x0f));
-        HWREGH(USB_BASE + MUSB_RXIS_OFFSET) = (1 << (urb->ep->bEndpointAddress & 0x0f));
-    } else {
-        HWREGH(USB_BASE + MUSB_TXIE_OFFSET) &= ~(1 << (urb->ep->bEndpointAddress & 0x0f));
-        HWREGH(USB_BASE + MUSB_TXIS_OFFSET) = (1 << (urb->ep->bEndpointAddress & 0x0f));
+    if (!pipe) {
+        usb_osal_leave_critical_section(flags);
+        return -USB_ERR_INVAL;
     }
 
-    musb_fifo_flush(bus, urb->ep->bEndpointAddress);
+    urb->errorcode = -USB_ERR_SHUTDOWN;
+
+#ifdef MUSB_SIFLI_EP_MAP
+    uint8_t chidx = pipe->chidx;
+    uint8_t fifo_ep = (urb->ep->bEndpointAddress & 0x80) | chidx;
+#else
+    uint8_t chidx = (urb->ep->bEndpointAddress & 0x0f);
+    uint8_t fifo_ep = urb->ep->bEndpointAddress;
+#endif
+
+    if (urb->ep->bEndpointAddress & 0x80) {
+        HWREGH(USB_BASE + MUSB_RXIE_OFFSET) &= ~(1 << chidx);
+        HWREGH(USB_BASE + MUSB_RXIS_OFFSET) = (1 << chidx);
+    } else {
+        HWREGH(USB_BASE + MUSB_TXIE_OFFSET) &= ~(1 << chidx);
+        HWREGH(USB_BASE + MUSB_TXIS_OFFSET) = (1 << chidx);
+    }
+
+    musb_fifo_flush(bus, fifo_ep);
+
+    usb_osal_leave_critical_section(flags);
 
     if (urb->timeout) {
         usb_osal_sem_give(pipe->waitsem);
@@ -868,7 +984,6 @@ int usbh_kill_urb(struct usbh_urb *urb)
         urb->complete(urb->arg, urb->errorcode);
     }
 
-    usb_osal_leave_critical_section(flags);
     return 0;
 }
 
@@ -921,13 +1036,6 @@ void handle_ep0(struct usbh_bus *bus)
         musb_fifo_flush(bus, 0);
         pipe->ep0_state = USB_EP0_STATE_SETUP;
         urb->errorcode = -USB_ERR_IO;
-        musb_urb_waitup(urb);
-        return;
-    }
-    if (ep0_status & USB_CSRL0_STALL) {
-        HWREGB(USB_TXCSRL_BASE(ep_idx)) &= ~USB_CSRL0_STALL;
-        pipe->ep0_state = USB_EP0_STATE_SETUP;
-        urb->errorcode = -USB_ERR_STALL;
         musb_urb_waitup(urb);
         return;
     }
@@ -1097,8 +1205,8 @@ void USBH_IRQHandler(uint8_t busid)
                 HWREGB(USB_TXCSRL_BASE(ep_idx)) &= ~USB_TXCSRL1_NAKTO;
                 urb->errorcode = -USB_ERR_NAK;
                 musb_urb_waitup(urb);
-            } else if (ep_csrl_status & USB_TXCSRL1_STALL) {
-                HWREGB(USB_TXCSRL_BASE(ep_idx)) &= ~USB_TXCSRL1_STALL;
+            } else if (ep_csrl_status & USB_TXCSRL1_STALLED) {
+                HWREGB(USB_TXCSRL_BASE(ep_idx)) &= ~USB_TXCSRL1_STALLED;
                 urb->errorcode = -USB_ERR_STALL;
                 musb_urb_waitup(urb);
             } else {
@@ -1146,8 +1254,8 @@ void USBH_IRQHandler(uint8_t busid)
                 HWREGB(USB_RXCSRL_BASE(ep_idx)) &= ~USB_RXCSRL1_NAKTO;
                 urb->errorcode = -USB_ERR_NAK;
                 musb_urb_waitup(urb);
-            } else if (ep_csrl_status & USB_RXCSRL1_STALL) {
-                HWREGB(USB_RXCSRL_BASE(ep_idx)) &= ~USB_RXCSRL1_STALL;
+            } else if (ep_csrl_status & USB_RXCSRL1_STALLED) {
+                HWREGB(USB_RXCSRL_BASE(ep_idx)) &= ~USB_RXCSRL1_STALLED;
                 urb->errorcode = -USB_ERR_STALL;
                 musb_urb_waitup(urb);
             } else if (ep_csrl_status & USB_RXCSRL1_RXRDY) {

@@ -3,9 +3,18 @@
 
 cmake_minimum_required(VERSION 3.13)
 
+set(RV_ARCH "rv32imafc")
+set(RV_ABI "ilp32f")
+
 set(CONFIG_CHERRYSH 1)
 set(CONFIG_CHERRYSH_INTERFACE "uart")
 set(CONFIG_USB_DEVICE 1)
+
+set(CONFIG_SDMMC 1)
+set(CONFIG_FATFS 1)
+
+set(CONFIG_CHERRYUSB_DEVICE_ADB_SYNC 1)
+set(CONFIG_CHERRYUSB_DEVICE_ADB_SYNC_FATFS 1)
 
 set(CONFIG_FREERTOS 1)
 set(CONFIG_LWIP 1)
@@ -31,9 +40,32 @@ sdk_compile_definitions(-DCONFIG_USBHOST_PLATFORM_CDC_RNDIS)
 sdk_compile_definitions(-DCONFIG_USBHOST_PLATFORM_ASIX)
 sdk_compile_definitions(-DCONFIG_USBHOST_PLATFORM_RTL8152)
 
+sdk_compile_definitions(-DSD_FATFS_ENABLE=1)
+sdk_compile_definitions(-DFF_CODE_PAGE=437)
 # sdk_compile_definitions(-DCONFIG_USB_OTG_ENABLE)
 
 sdk_compile_options("-O2")
+
+sdk_ld_options(-uusbd_cdc_acm_init_intf)
+sdk_ld_options(-uusbd_hid_init_intf)
+sdk_ld_options(-uusbd_msc_init_intf)
+sdk_ld_options(-uusbd_video_init_intf)
+sdk_ld_options(-uusbd_audio_init_intf)
+sdk_ld_options(-uusbd_cdc_ecm_init_intf)
+sdk_ld_options(-uusbd_rndis_init_intf)
+sdk_ld_options(-uusbd_dfu_init_intf)
+sdk_ld_options(-uusbd_initialize)
+sdk_ld_options(-uusbd_desc_register)
+sdk_ld_options(-uusbd_add_interface)
+sdk_ld_options(-uusbd_add_endpoint)
+sdk_ld_options(-uusbd_rndis_start_write)
+sdk_ld_options(-uusbd_rndis_start_read)
+sdk_ld_options(-uusbd_cdc_ecm_start_write)
+sdk_ld_options(-uusbd_cdc_ecm_start_read)
+sdk_ld_options(-uusbd_video_stream_start_write)
+sdk_ld_options(-uusbd_video_stream_split_transfer)
+
+sdk_ld_options(-lm)
 
 sdk_inc(inc)
 sdk_app_src(inc/arch/sys_arch.c)

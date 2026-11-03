@@ -15,8 +15,12 @@
 
 static struct usbh_asix g_asix_class;
 
-static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_asix_rx_buffer[USB_ALIGN_UP(CONFIG_USBHOST_ASIX_ETH_MAX_TX_SIZE, CONFIG_USB_ALIGN_SIZE)];
-static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_asix_tx_buffer[USB_ALIGN_UP(CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE, CONFIG_USB_ALIGN_SIZE)];
+#if CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE > (16 * 1024)
+#error "CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE must be less than 16K"
+#endif
+
+static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_asix_rx_buffer[USB_ALIGN_UP(CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE, CONFIG_USB_ALIGN_SIZE)];
+static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_asix_tx_buffer[USB_ALIGN_UP(CONFIG_USBHOST_ASIX_ETH_MAX_TX_SIZE, CONFIG_USB_ALIGN_SIZE)];
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_asix_inttx_buffer[USB_ALIGN_UP(16, CONFIG_USB_ALIGN_SIZE)];
 
 static USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_asix_buf[USB_ALIGN_UP(32, CONFIG_USB_ALIGN_SIZE)];
@@ -71,10 +75,10 @@ static int usbh_asix_read_cmd(struct usbh_asix *asix_class,
     setup->wLength = size;
 
     ret = usbh_control_transfer(asix_class->hport, setup, g_asix_buf);
-    if (ret < 8) {
+    if (ret < size) {
         return ret;
     }
-    memcpy(data, g_asix_buf, MIN(ret - 8, size));
+    memcpy(data, g_asix_buf, size);
 
     return ret;
 }
@@ -679,17 +683,10 @@ void usbh_asix_rx_thread(CONFIG_USB_OSAL_THREAD_SET_ARGV)
     uint16_t len;
     uint16_t len_crc;
     uint32_t data_offset;
-#if CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE <= (16 * 1024)
-    uint32_t transfer_size = CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE;
-#else
-    uint32_t transfer_size = (16 * 1024);
-#endif
 
     (void)CONFIG_USB_OSAL_THREAD_GET_ARGV;
     USB_LOG_INFO("Create asix rx thread\r\n");
-    // clang-format off
-find_class:
-    // clang-format on
+
     g_asix_class.connect_status = false;
     if (usbh_find_class_instance("/dev/asix") == NULL) {
         goto delete;
@@ -698,36 +695,36 @@ find_class:
     while (g_asix_class.connect_status == false) {
         ret = usbh_asix_get_connect_status(&g_asix_class);
         if (ret < 0) {
-            usb_osal_msleep(100);
-            goto find_class;
+            goto delete;
         }
         usb_osal_msleep(128);
     }
 
     g_asix_rx_length = 0;
     while (1) {
-        usbh_bulk_urb_fill(&g_asix_class.bulkin_urb, g_asix_class.hport, g_asix_class.bulkin, &g_asix_rx_buffer[g_asix_rx_length], transfer_size, USB_OSAL_WAITING_FOREVER, NULL, NULL);
+        usbh_bulk_urb_fill(&g_asix_class.bulkin_urb, g_asix_class.hport, g_asix_class.bulkin, g_asix_rx_buffer, CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE, USB_OSAL_WAITING_FOREVER, NULL, NULL);
         ret = usbh_submit_urb(&g_asix_class.bulkin_urb);
         if (ret < 0) {
-            goto find_class;
+            goto delete;
         }
 
-        g_asix_rx_length += g_asix_class.bulkin_urb.actual_length;
+        g_asix_rx_length = g_asix_class.bulkin_urb.actual_length;
+        if (g_asix_rx_length == 0) {
+            continue;
+        }
 
-        /* A transfer is complete because last packet is a short packet.
-         * Short packet is not zero, match g_asix_rx_length % USB_GET_MAXPACKETSIZE(g_asix_class.bulkin->wMaxPacketSize).
-         * Short packet is zero, check if g_asix_class.bulkin_urb.actual_length < transfer_size, for example transfer is complete with size is 1024 < 2048.
-        */
-        if (g_asix_rx_length % USB_GET_MAXPACKETSIZE(g_asix_class.bulkin->wMaxPacketSize) ||
-            (g_asix_class.bulkin_urb.actual_length < transfer_size)) {
+        if (g_asix_rx_length < CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE) {
             USB_LOG_DBG("rxlen:%d\r\n", g_asix_rx_length);
 
             data_offset = 0;
             while (g_asix_rx_length > 0) {
+                if (g_asix_rx_length < 4) {
+                    break;
+                }
                 len = ((uint16_t)g_asix_rx_buffer[data_offset + 0] | ((uint16_t)(g_asix_rx_buffer[data_offset + 1]) << 8)) & 0x7ff;
                 len_crc = g_asix_rx_buffer[data_offset + 2] | ((uint16_t)(g_asix_rx_buffer[data_offset + 3]) << 8);
 
-                if (len != (~len_crc & 0x7ff)) {
+                if (len != (~len_crc & 0x7ff) || len == 0 || (len > g_asix_rx_length - 4)) {
                     USB_LOG_ERR("rx header error\r\n");
                     g_asix_rx_length = 0;
                     continue;
@@ -738,20 +735,13 @@ find_class:
                 g_asix_rx_length -= (len + 4);
                 data_offset += (len + 4);
 
-                if (g_asix_rx_length < 4) {
-                    g_asix_rx_length = 0;
+                if ((len & 1) && g_asix_rx_length > 0) {
+                    g_asix_rx_length--;
+                    data_offset++;
                 }
             }
         } else {
-#if CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE <= (16 * 1024)
-            if (g_asix_rx_length == CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE) {
-#else
-            if ((g_asix_rx_length + (16 * 1024)) > CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE) {
-#endif
-                USB_LOG_ERR("Rx packet is overflow, please reduce tcp window size or increase CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE\r\n");
-                while (1) {
-                }
-            }
+            USB_LOG_ERR("asix packet overflow\r\n");
         }
     }
     // clang-format off
@@ -774,17 +764,21 @@ int usbh_asix_eth_output(uint32_t buflen)
         return -USB_ERR_NOTCONN;
     }
 
+    if (buflen > (sizeof(g_asix_tx_buffer) - 8)) {
+        return -USB_ERR_NOMEM;
+    }
+
     g_asix_tx_buffer[0] = buflen & 0xff;
     g_asix_tx_buffer[1] = (buflen >> 8) & 0xff;
     g_asix_tx_buffer[2] = ~g_asix_tx_buffer[0];
     g_asix_tx_buffer[3] = ~g_asix_tx_buffer[1];
 
-    if (!(buflen + 4) % USB_GET_MAXPACKETSIZE(g_asix_class.bulkout->wMaxPacketSize)) {
+    if (((buflen + 4U) % USB_GET_MAXPACKETSIZE(g_asix_class.bulkout->wMaxPacketSize)) == 0U) {
         USB_LOG_DBG("txlen:%d\r\n", buflen + 8);
-        g_asix_tx_buffer[buflen + 4 + 0] = 0x00;
-        g_asix_tx_buffer[buflen + 4 + 1] = 0x00;
-        g_asix_tx_buffer[buflen + 4 + 2] = 0xff;
-        g_asix_tx_buffer[buflen + 4 + 3] = 0xff;
+        g_asix_tx_buffer[buflen + 4] = 0x00;
+        g_asix_tx_buffer[buflen + 5] = 0x00;
+        g_asix_tx_buffer[buflen + 6] = 0xff;
+        g_asix_tx_buffer[buflen + 7] = 0xff;
         actual_len = buflen + 8;
     } else {
         USB_LOG_DBG("txlen:%d\r\n", buflen + 4);

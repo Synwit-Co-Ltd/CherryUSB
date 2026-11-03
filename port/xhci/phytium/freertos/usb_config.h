@@ -1,36 +1,32 @@
 /*
- * Copyright : (C) 2024 Phytium Information Technology, Inc.
+ * Copyright (c) 2022, sakumisu
  *
  * SPDX-License-Identifier: Apache-2.0
- *
- * Modify History:
- *  Ver   Who        Date         Changes
- * ----- ------     --------    --------------------------------------
- * 1.0   zhugengyu  2024/6/26 first commit
  */
-
 #ifndef CHERRYUSB_CONFIG_H
 #define CHERRYUSB_CONFIG_H
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "sdkconfig.h"
-#include "FreeRTOS.h"
-#include "task.h"
+#include "fparameters.h"
 
 /* ================ USB common Configuration ================ */
 
 #define CONFIG_USB_PRINTF(...) printf(__VA_ARGS__)
 
-void *xhci_mem_malloc(size_t align, size_t size);
-void xhci_mem_free(void *ptr);
-
-#define XHCI_DCACHE_FLUSH      (1 << 0)
-#define XHCI_DCACHE_INVALIDATE (1 << 1)
-void xhci_dcache_sync(void *ptr, size_t len, uint32_t flags);
-
+void *usb_sys_mem_malloc(size_t size);
+void usb_sys_mem_free(void *ptr);
+void *usb_sys_malloc_align(size_t align, size_t size);
 unsigned long usb_hc_get_register_base(uint32_t id);
+unsigned long usb_dc_get_register_base(uint32_t id);
+void usb_hc_disable_interrupt(uint32_t id);
+void usb_hc_enable_interrupt(uint32_t id);
 
-#define usb_malloc(size) xhci_mem_malloc(sizeof(int), size)
-#define usb_free(ptr)    xhci_mem_free(ptr)
+#define usb_malloc(size)       usb_sys_mem_malloc(size)
+#define usb_calloc(num, size)  usb_sys_mem_malloc((num) * (size))
+#define usb_free(ptr)          usb_sys_mem_free(ptr)
+#define usb_align(align, size) usb_sys_malloc_align(align, size)
 
 #ifndef CONFIG_USB_DBG_LEVEL
 #if defined(CONFIG_LOG_ERROR)
@@ -41,15 +37,21 @@ unsigned long usb_hc_get_register_base(uint32_t id);
 #define CONFIG_USB_DBG_LEVEL USB_DBG_INFO
 #elif defined(CONFIG_LOG_DEBUG) || defined(CONFIG_LOG_VERBOS)
 #define CONFIG_USB_DBG_LEVEL USB_DBG_LOG
+#elif defined(CONFIG_LOG_NONE)
+#define CONFIG_USB_DBG_LEVEL USB_DBG_ERROR
+#undef CONFIG_USB_PRINTF
+#define CONFIG_USB_PRINTF(...)
 #else
 #define CONFIG_USB_DBG_LEVEL USB_DBG_ERROR
 #endif
 #endif
 
+#define CONFIG_USBDEV_ADVANCE_DESC
+
 /* Enable print with color */
 #define CONFIG_USB_PRINTF_COLOR_ENABLE
 
-/* data align size when use dma */
+/* data align size when use dma or use dcache */
 #ifndef CONFIG_USB_ALIGN_SIZE
 #define CONFIG_USB_ALIGN_SIZE 4
 #endif
@@ -58,74 +60,6 @@ unsigned long usb_hc_get_register_base(uint32_t id);
 #define USB_NOCACHE_RAM_SECTION __attribute__((section(".noncacheable")))
 
 /* ================= USB Device Stack Configuration ================ */
-
-/* Ep0 in and out transfer buffer */
-#ifndef CONFIG_USBDEV_REQUEST_BUFFER_LEN
-#define CONFIG_USBDEV_REQUEST_BUFFER_LEN 512
-#endif
-
-/* Setup packet log for debug */
-// #define CONFIG_USBDEV_SETUP_LOG_PRINT
-
-/* Send ep0 in data from user buffer instead of copying into ep0 reqdata
- * Please note that user buffer must be aligned with CONFIG_USB_ALIGN_SIZE
-*/
-// #define CONFIG_USBDEV_EP0_INDATA_NO_COPY
-
-/* Check if the input descriptor is correct */
-// #define CONFIG_USBDEV_DESC_CHECK
-
-/* Enable test mode */
-// #define CONFIG_USBDEV_TEST_MODE
-
-#ifndef CONFIG_USBDEV_MSC_MAX_LUN
-#define CONFIG_USBDEV_MSC_MAX_LUN 1
-#endif
-
-#ifndef CONFIG_USBDEV_MSC_MAX_BUFSIZE
-#define CONFIG_USBDEV_MSC_MAX_BUFSIZE 512
-#endif
-
-#ifndef CONFIG_USBDEV_MSC_MANUFACTURER_STRING
-#define CONFIG_USBDEV_MSC_MANUFACTURER_STRING ""
-#endif
-
-#ifndef CONFIG_USBDEV_MSC_PRODUCT_STRING
-#define CONFIG_USBDEV_MSC_PRODUCT_STRING ""
-#endif
-
-#ifndef CONFIG_USBDEV_MSC_VERSION_STRING
-#define CONFIG_USBDEV_MSC_VERSION_STRING "0.01"
-#endif
-
-// #define CONFIG_USBDEV_MSC_THREAD
-
-#ifndef CONFIG_USBDEV_MSC_PRIO
-#define CONFIG_USBDEV_MSC_PRIO 4
-#endif
-
-#ifndef CONFIG_USBDEV_MSC_STACKSIZE
-#define CONFIG_USBDEV_MSC_STACKSIZE 2048
-#endif
-
-#ifndef CONFIG_USBDEV_RNDIS_RESP_BUFFER_SIZE
-#define CONFIG_USBDEV_RNDIS_RESP_BUFFER_SIZE 156
-#endif
-
-/* rndis transfer buffer size, must be a multiple of (1536 + 44)*/
-#ifndef CONFIG_USBDEV_RNDIS_ETH_MAX_FRAME_SIZE
-#define CONFIG_USBDEV_RNDIS_ETH_MAX_FRAME_SIZE 1580
-#endif
-
-#ifndef CONFIG_USBDEV_RNDIS_VENDOR_ID
-#define CONFIG_USBDEV_RNDIS_VENDOR_ID 0x0000ffff
-#endif
-
-#ifndef CONFIG_USBDEV_RNDIS_VENDOR_DESC
-#define CONFIG_USBDEV_RNDIS_VENDOR_DESC "CherryUSB"
-#endif
-
-#define CONFIG_USBDEV_RNDIS_USING_LWIP
 
 /* ================ USB HOST Stack Configuration ================== */
 
@@ -151,9 +85,20 @@ unsigned long usb_hc_get_register_base(uint32_t id);
 #define CONFIG_USBHOST_PSC_STACKSIZE 8192
 #endif
 
-//#define CONFIG_USBHOST_GET_STRING_DESC
+/* XHCI deferred interrupt thread priority (0 = highest, CherryUSB
+ * convention; must match hub priority PSC_PRIO) */
+#ifndef CONFIG_USB_XHCI_IRQ_PRIO
+#define CONFIG_USB_XHCI_IRQ_PRIO 0
+#endif
 
-// #define CONFIG_USBHOST_MSOS_ENABLE
+/* GIC interrupt priority: must be >= configMAX_API_CALL_INTERRUPT_PRIORITY
+ * so xSemaphoreGiveFromISR from a hard ISR is well-defined */
+#define USB_XHCI_GIC_IRQ_PRIO 13U
+#ifdef configMAX_API_CALL_INTERRUPT_PRIORITY
+_Static_assert(USB_XHCI_GIC_IRQ_PRIO >= configMAX_API_CALL_INTERRUPT_PRIORITY,
+               "XHCI GIC irq priority must be >= configMAX_API_CALL_INTERRUPT_PRIORITY");
+#endif
+
 #ifndef CONFIG_USBHOST_MSOS_VENDOR_CODE
 #define CONFIG_USBHOST_MSOS_VENDOR_CODE 0x00
 #endif
@@ -175,118 +120,45 @@ unsigned long usb_hc_get_register_base(uint32_t id);
 #define CONFIG_INPUT_MOUSE_WHEEL
 #endif
 
-/* This parameter affects usb performance, and depends on (TCP_WND)tcp eceive windows size,
- * you can change to 2K ~ 16K and must be larger than TCP RX windows size in order to avoid being overflow.
- */
-#ifndef CONFIG_USBHOST_RNDIS_ETH_MAX_RX_SIZE
-#define CONFIG_USBHOST_RNDIS_ETH_MAX_RX_SIZE (2048)
-#endif
-
-/* Because lwip do not support multi pbuf at a time, so increasing this variable has no performance improvement */
-#ifndef CONFIG_USBHOST_RNDIS_ETH_MAX_TX_SIZE
-#define CONFIG_USBHOST_RNDIS_ETH_MAX_TX_SIZE (2048)
-#endif
-
-/* This parameter affects usb performance, and depends on (TCP_WND)tcp eceive windows size,
- * you can change to 2K ~ 16K and must be larger than TCP RX windows size in order to avoid being overflow.
- */
-#ifndef CONFIG_USBHOST_CDC_NCM_ETH_MAX_RX_SIZE
-#define CONFIG_USBHOST_CDC_NCM_ETH_MAX_RX_SIZE (2048)
-#endif
-/* Because lwip do not support multi pbuf at a time, so increasing this variable has no performance improvement */
-#ifndef CONFIG_USBHOST_CDC_NCM_ETH_MAX_TX_SIZE
-#define CONFIG_USBHOST_CDC_NCM_ETH_MAX_TX_SIZE (2048)
-#endif
-
-/* This parameter affects usb performance, and depends on (TCP_WND)tcp eceive windows size,
- * you can change to 2K ~ 16K and must be larger than TCP RX windows size in order to avoid being overflow.
- */
-#ifndef CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE
-#define CONFIG_USBHOST_ASIX_ETH_MAX_RX_SIZE (2048)
-#endif
-/* Because lwip do not support multi pbuf at a time, so increasing this variable has no performance improvement */
-#ifndef CONFIG_USBHOST_ASIX_ETH_MAX_TX_SIZE
-#define CONFIG_USBHOST_ASIX_ETH_MAX_TX_SIZE (2048)
-#endif
-
-/* This parameter affects usb performance, and depends on (TCP_WND)tcp eceive windows size,
- * you can change to 2K ~ 16K and must be larger than TCP RX windows size in order to avoid being overflow.
- */
-#ifndef CONFIG_USBHOST_RTL8152_ETH_MAX_RX_SIZE
-#define CONFIG_USBHOST_RTL8152_ETH_MAX_RX_SIZE (2048)
-#endif
-/* Because lwip do not support multi pbuf at a time, so increasing this variable has no performance improvement */
-#ifndef CONFIG_USBHOST_RTL8152_ETH_MAX_TX_SIZE
-#define CONFIG_USBHOST_RTL8152_ETH_MAX_TX_SIZE (2048)
-#endif
-
-#define CONFIG_USBHOST_BLUETOOTH_HCI_H4
-// #define CONFIG_USBHOST_BLUETOOTH_HCI_LOG
-
-#ifndef CONFIG_USBHOST_BLUETOOTH_TX_SIZE
-#define CONFIG_USBHOST_BLUETOOTH_TX_SIZE 2048
-#endif
-#ifndef CONFIG_USBHOST_BLUETOOTH_RX_SIZE
-#define CONFIG_USBHOST_BLUETOOTH_RX_SIZE 2048
-#endif
-
 /* ================ USB Device Port Configuration ================*/
-
-#ifndef CONFIG_USBDEV_MAX_BUS
-#define CONFIG_USBDEV_MAX_BUS 2 // for now, bus num must be 1 except hpm ip
-#endif
-
-#ifndef CONFIG_USBDEV_EP_NUM
-#define CONFIG_USBDEV_EP_NUM 8
-#endif
-
-/* ---------------- FSDEV Configuration ---------------- */
-//#define CONFIG_USBDEV_FSDEV_PMA_ACCESS 2 // maybe 1 or 2, many chips may have a difference
-
-/* ---------------- DWC2 Configuration ---------------- */
-// #define CONFIG_USB_DWC2_RXALL_FIFO_SIZE (1024 / 4)
-// #define CONFIG_USB_DWC2_TX0_FIFO_SIZE (64 / 4)
-// #define CONFIG_USB_DWC2_TX1_FIFO_SIZE (512 / 4)
-// #define CONFIG_USB_DWC2_TX2_FIFO_SIZE (64 / 4)
-// #define CONFIG_USB_DWC2_TX3_FIFO_SIZE (64 / 4)
-// #define CONFIG_USB_DWC2_TX4_FIFO_SIZE (0 / 4)
-// #define CONFIG_USB_DWC2_TX5_FIFO_SIZE (0 / 4)
-// #define CONFIG_USB_DWC2_TX6_FIFO_SIZE (0 / 4)
-// #define CONFIG_USB_DWC2_TX7_FIFO_SIZE (0 / 4)
-// #define CONFIG_USB_DWC2_TX8_FIFO_SIZE (0 / 4)
-
-/* ---------------- MUSB Configuration ---------------- */
-// #define CONFIG_USB_MUSB_SUNXI
 
 /* ================ USB Host Port Configuration ==================*/
 #ifndef CONFIG_USBHOST_MAX_BUS
-#define CONFIG_USBHOST_MAX_BUS 2
+#define CONFIG_USBHOST_MAX_BUS 4
 #endif
 
 #ifndef CONFIG_USBHOST_PIPE_NUM
 #define CONFIG_USBHOST_PIPE_NUM 10
 #endif
 
-/* ---------------- EHCI Configuration ---------------- */
+/* ================ USB Dcache Configuration ==================*/
 
-#define CONFIG_USB_EHCI_HCCR_OFFSET     (0x0)
-#define CONFIG_USB_EHCI_FRAME_LIST_SIZE 1024
-#define CONFIG_USB_EHCI_QH_NUM          CONFIG_USBHOST_PIPE_NUM
-#define CONFIG_USB_EHCI_QTD_NUM         3
-#define CONFIG_USB_EHCI_ITD_NUM         20
-// #define CONFIG_USB_EHCI_HCOR_RESERVED_DISABLE
-// #define CONFIG_USB_EHCI_CONFIGFLAG
-// #define CONFIG_USB_EHCI_ISO
-// #define CONFIG_USB_EHCI_WITH_OHCI
+/* ================ USB Device Framework Configuration ============*/
 
-/* ---------------- OHCI Configuration ---------------- */
-#define CONFIG_USB_OHCI_HCOR_OFFSET (0x0)
-
-/* ---------------- XHCI Configuration ---------------- */
-#define CONFIG_USB_XHCI_HCCR_OFFSET (0x0)
-
-#ifndef CONFIG_USB_XHCI_ENABLE_SOFT_ISR
-#define CONFIG_USB_XHCI_ENABLE_SOFT_ISR   0
+#ifndef USB_HAVE_BUSDMA
+#define USB_HAVE_BUSDMA 1
+#endif
+#define USB_HAVE_PER_BUS_PROCESS 1
+#ifndef USB_HAVE_FIXED_IFACE
+#define USB_HAVE_FIXED_IFACE 1
+#endif
+#ifndef USB_HAVE_FIXED_ENDPOINT
+#define USB_HAVE_FIXED_ENDPOINT 1
+#endif
+#ifndef USB_HAVE_MALLOC_WAITOK
+#define USB_HAVE_MALLOC_WAITOK 0
+#endif
+#ifndef USB_HAVE_UGEN
+#define USB_HAVE_UGEN 0
+#endif
+#ifndef USB_HAVE_PF
+#define USB_HAVE_PF 0
+#endif
+#ifndef USB_HAVE_POWERD
+#define USB_HAVE_POWERD 0
+#endif
+#ifndef USB_HAVE_TT_SUPPORT
+#define USB_HAVE_TT_SUPPORT 0
 #endif
 
 #endif

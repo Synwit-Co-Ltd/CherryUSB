@@ -13,12 +13,30 @@ static int xinput_vendor_class_request_handler(uint8_t busid, struct usb_setup_p
 {
     struct xinput_in_report xinput_report;
 
-    memset(&xinput_report, 0, sizeof(xinput_report));
+    memset(&xinput_report, 0, sizeof(struct xinput_in_report));
     xinput_report.report_size = 20;
 
-    memcpy(*data, &xinput_report, sizeof(xinput_report));
-    *len = sizeof(xinput_report);
+    memcpy(*data, &xinput_report, sizeof(struct xinput_in_report));
+    *len = sizeof(struct xinput_in_report);
     return 0;
+}
+
+// Convert analog value from Joypad (0-255, center 128) to signed 16-bit
+static int16_t convert_axis_to_s16(uint8_t value)
+{
+    int32_t scaled = ((int32_t)value - 128) * 256;
+    if (scaled < -32768) scaled = -32768;
+    if (scaled > 32767) scaled = 32767;
+    return (int16_t)scaled;
+}
+
+// Convert and invert axis (for Y-axis where convention differs)
+static int16_t convert_axis_to_s16_inverted(uint8_t value)
+{
+    int32_t scaled = -((int32_t)value - 128) * 256;
+    if (scaled < -32768) scaled = -32768;
+    if (scaled > 32767) scaled = 32767;
+    return (int16_t)scaled;
 }
 
 int usbd_gamepad_xinput_send_report(uint8_t ep, struct usb_gamepad_report *report)
@@ -26,7 +44,7 @@ int usbd_gamepad_xinput_send_report(uint8_t ep, struct usb_gamepad_report *repor
     struct xinput_in_report *xinput_report;
 
     xinput_report = (struct xinput_in_report *)gamepad_report_buffer;
-    memset(xinput_report, 0, sizeof(xinput_report));
+    memset(xinput_report, 0, sizeof(struct xinput_in_report));
     xinput_report->report_size = 20;
 
     if (report->buttons & USB_GAMEPAD_BUTTON_DU)
@@ -68,6 +86,13 @@ int usbd_gamepad_xinput_send_report(uint8_t ep, struct usb_gamepad_report *repor
     if (xinput_report->rt == 0 && (report->buttons & USB_GAMEPAD_BUTTON_R2))
         xinput_report->rt = 0xFF;
 
+    // Analog sticks (signed 16-bit, -32768 to +32767)
+    // Y-axis inverted: input 0=down, XInput convention positive=up
+    xinput_report->lx = convert_axis_to_s16(report->lx);
+    xinput_report->ly = convert_axis_to_s16_inverted(report->ly);
+    xinput_report->rx = convert_axis_to_s16(report->rx);
+    xinput_report->ry = convert_axis_to_s16_inverted(report->ry);
+
     return usbd_ep_start_write(0, ep, gamepad_report_buffer, sizeof(struct xinput_in_report));
 }
 
@@ -105,7 +130,7 @@ int usbd_gamepad_switch_send_report(uint8_t ep, struct usb_gamepad_report *repor
     struct switch_in_report *switch_report;
 
     switch_report = (struct switch_in_report *)gamepad_report_buffer;
-    memset(switch_report, 0, sizeof(switch_report));
+    memset(switch_report, 0, sizeof(struct switch_in_report));
 
     if (report->buttons & USB_GAMEPAD_BUTTON_S1)
         switch_report->buttons |= SWITCH_MASK_MINUS;

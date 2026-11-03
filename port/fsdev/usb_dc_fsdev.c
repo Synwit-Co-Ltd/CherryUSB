@@ -52,18 +52,33 @@ struct fsdev_udc {
     struct fsdev_ep_state out_ep[CONFIG_USBDEV_EP_NUM]; /*!< OUT endpoint parameters */
 } g_fsdev_udc;
 
-__WEAK void usb_dc_low_level_init(void)
-{
-}
+extern void usb_dc_low_level_init(uint8_t busid);
+extern void usb_dc_low_level_deinit(uint8_t busid);
 
-__WEAK void usb_dc_low_level_deinit(void)
-{
-}
-
+/**
+ * @brief Initialize the USB device controller.
+ * @param busid USB bus index (fsdev supports a single instance, bus 0).
+ * @retval 0 on success.
+ */
 int usb_dc_init(uint8_t busid)
 {
-    usb_dc_low_level_init();
+    usb_dc_low_level_init(busid);
 
+#if defined(N32H4X_FSDEV)
+    /* N32H4x power-on sequence: the USB_CTRL reset value is 0x0300
+     * -- PD(bit9, power-down) and FRST(bit8, force-reset) are both set.
+     * 1. Clear PD, wait for the internal analog voltage reference to settle.
+     * 2. Clear FRST.
+     * 3. Clear the STS register to drop pending interrupts. */
+    USB->CNTR &= (uint32_t)~USB_CNTR_PDWN;   /* exit power-down */
+
+    /* Wait for the internal reference voltage to stabilise. */
+    for (volatile uint32_t i = 0U; i < 1000U; i++) {
+    }
+
+    USB->CNTR &= (uint32_t)~USB_CNTR_FRES;   /* clear force-reset flag */
+    USB->ISTR = 0U;                          /* clear pending interrupts */
+#else
     /* Init Device */
     /* CNTR_FRES = 1 */
     USB->CNTR = (uint16_t)USB_CNTR_FRES;
@@ -73,6 +88,7 @@ int usb_dc_init(uint8_t busid)
 
     /* Clear pending interrupts */
     USB->ISTR = 0U;
+#endif
 
     /*Set Btable Address*/
     USB->BTABLE = BTABLE_ADDRESS;
@@ -91,8 +107,13 @@ int usb_dc_init(uint8_t busid)
     /* Set interrupt mask */
     USB->CNTR = (uint16_t)winterruptmask;
 
+#if defined(N32H4X_FSDEV)
+    /* Enabling DP Pull-UP through USB_CTRL.PU */
+    USB->CNTR |= (uint32_t)USB_CNTR_PU;
+#else
     /* Enabling DP Pull-UP bit to Connect internal PU resistor on USB DP line */
     USB->BCDR |= (uint16_t)USB_BCDR_DPPU;
+#endif
 
     return 0;
 }
@@ -107,8 +128,8 @@ int usb_dc_deinit(uint8_t busid)
 
     /* switch-off device */
     USB->CNTR = (uint16_t)(USB_CNTR_FRES | USB_CNTR_PDWN);
+    usb_dc_low_level_deinit(busid);
 
-    usb_dc_low_level_deinit();
     return 0;
 }
 
@@ -325,6 +346,10 @@ int usbd_ep_start_read(uint8_t busid, const uint8_t ep, uint8_t *data, uint32_t 
     return 0;
 }
 
+/**
+ * @brief USB FS device interrupt handler: dispatches ISTR events.
+ * @param busid USB bus index (fsdev supports a single instance, bus 0).
+ */
 void USBD_IRQHandler(uint8_t busid)
 {
     uint16_t wIstr, wEPVal;
@@ -339,7 +364,13 @@ void USBD_IRQHandler(uint8_t busid)
             wIstr = USB->ISTR;
 
             /* extract highest priority endpoint number */
+#if defined(N32H4X_FSDEV)
+            /* EP_ID is at STS bits [11:8] */
+            ep_idx = (uint8_t)((wIstr & USB_ISTR_EP_ID) >> USB_ISTR_EP_ID_Pos);
+#else
+            /* ST: EP_ID is at ISTR bits [3:0] */
             ep_idx = (uint8_t)(wIstr & USB_ISTR_EP_ID);
+#endif
 
             if (ep_idx == 0U) {
                 if ((wIstr & USB_ISTR_DIR) == 0U) {

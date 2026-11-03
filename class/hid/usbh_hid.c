@@ -103,10 +103,10 @@ int usbh_hid_get_idle(struct usbh_hid *hid_class, uint8_t *buffer)
     setup->wLength = 1;
 
     ret = usbh_control_transfer(hid_class->hport, setup, g_hid_buf[hid_class->minor]);
-    if (ret < 8) {
+    if (ret < 1) {
         return ret;
     }
-    memcpy(buffer, g_hid_buf[hid_class->minor], MIN((uint32_t)ret - 8, 1));
+    *buffer = g_hid_buf[hid_class->minor][0];
     return ret;
 }
 
@@ -122,7 +122,7 @@ int usbh_hid_set_protocol(struct usbh_hid *hid_class, uint8_t protocol)
     setup->bmRequestType = USB_REQUEST_DIR_OUT | USB_REQUEST_CLASS | USB_REQUEST_RECIPIENT_INTERFACE;
     setup->bRequest = HID_REQUEST_SET_PROTOCOL;
     setup->wValue = protocol;
-    setup->wIndex = 0;
+    setup->wIndex = hid_class->intf;
     setup->wLength = 0;
 
     return usbh_control_transfer(hid_class->hport, setup, NULL);
@@ -145,10 +145,10 @@ int usbh_hid_get_protocol(struct usbh_hid *hid_class, uint8_t *protocol)
     setup->wLength = 1;
 
     ret = usbh_control_transfer(hid_class->hport, setup, g_hid_buf[hid_class->minor]);
-    if (ret < 8) {
+    if (ret < 1) {
         return ret;
     }
-    memcpy(protocol, g_hid_buf[hid_class->minor], MIN((uint32_t)ret - 8, 1));
+    *protocol = g_hid_buf[hid_class->minor][0];
     return ret;
 }
 
@@ -164,7 +164,7 @@ int usbh_hid_set_report(struct usbh_hid *hid_class, uint8_t report_type, uint8_t
     setup->bmRequestType = USB_REQUEST_DIR_OUT | USB_REQUEST_CLASS | USB_REQUEST_RECIPIENT_INTERFACE;
     setup->bRequest = HID_REQUEST_SET_REPORT;
     setup->wValue = (uint16_t)(((uint32_t)report_type << 8U) | (uint32_t)report_id);
-    setup->wIndex = 0;
+    setup->wIndex = hid_class->intf;
     setup->wLength = buflen;
 
     return usbh_control_transfer(hid_class->hport, setup, buffer);
@@ -182,7 +182,7 @@ int usbh_hid_get_report(struct usbh_hid *hid_class, uint8_t report_type, uint8_t
     setup->bmRequestType = USB_REQUEST_DIR_IN | USB_REQUEST_CLASS | USB_REQUEST_RECIPIENT_INTERFACE;
     setup->bRequest = HID_REQUEST_GET_REPORT;
     setup->wValue = (uint16_t)(((uint32_t)report_type << 8U) | (uint32_t)report_id);
-    setup->wIndex = 0;
+    setup->wIndex = hid_class->intf;
     setup->wLength = buflen;
 
     return usbh_control_transfer(hid_class->hport, setup, buffer);
@@ -194,6 +194,7 @@ int usbh_hid_connect(struct usbh_hubport *hport, uint8_t intf)
     uint8_t cur_iface = 0xff;
     uint8_t *p;
     bool found = false;
+    uint32_t desc_len = 0;
 
     struct usbh_hid *hid_class = usbh_hid_class_alloc();
     if (hid_class == NULL) {
@@ -207,21 +208,18 @@ int usbh_hid_connect(struct usbh_hubport *hport, uint8_t intf)
     hport->config.intf[intf].priv = hid_class;
 
     p = hport->raw_config_desc;
-    while (p[DESC_bLength]) {
+    while (desc_len < hport->config.config_desc.wTotalLength) {
         switch (p[DESC_bDescriptorType]) {
             case USB_DESCRIPTOR_TYPE_INTERFACE:
                 cur_iface = p[INTF_DESC_bInterfaceNumber];
-                if (cur_iface == intf) {
-                    hid_class->protocol = p[7];
-                    struct usb_hid_descriptor *desc = (struct usb_hid_descriptor *)(p + 9);
-
-                    if (desc->bDescriptorType != HID_DESCRIPTOR_TYPE_HID) {
-                        USB_LOG_ERR("HID descriptor not found\r\n");
-                        return -USB_ERR_INVAL;
-                    }
+                hid_class->protocol = p[7];
+                break;
+            case HID_DESCRIPTOR_TYPE_HID:
+                if ((cur_iface == intf) && (p[DESC_bLength] >= sizeof(struct usb_hid_descriptor))) {
+                    struct usb_hid_descriptor *desc = (struct usb_hid_descriptor *)p;
 
                     if (desc->subdesc[0].bDescriptorType != HID_DESCRIPTOR_TYPE_HID_REPORT) {
-                        USB_LOG_ERR("HID report descriptor not found\r\n");
+                        USB_LOG_ERR("invalid bDescriptorType\r\n");
                         return -USB_ERR_INVAL;
                     }
 
@@ -234,16 +232,22 @@ int usbh_hid_connect(struct usbh_hubport *hport, uint8_t intf)
                 break;
         }
         /* skip to next descriptor */
+        desc_len += p[DESC_bLength];
         p += p[DESC_bLength];
     }
 
     if (found == false) {
-        USB_LOG_ERR("HID interface not found\r\n");
+        USB_LOG_ERR("HID report descriptor not found\r\n");
         return -USB_ERR_INVAL;
     }
 found:
     for (uint8_t i = 0; i < hport->config.intf[intf].altsetting[0].intf_desc.bNumEndpoints; i++) {
         ep_desc = &hport->config.intf[intf].altsetting[0].ep[i].ep_desc;
+
+        if (USB_GET_ENDPOINT_TYPE(ep_desc->bmAttributes) != USB_ENDPOINT_TYPE_INTERRUPT) {
+            return -USB_ERR_INVAL;
+        }
+
         if (ep_desc->bEndpointAddress & 0x80) {
             USBH_EP_INIT(hid_class->intin, ep_desc);
         } else {
@@ -291,45 +295,38 @@ static uint32_t hid_get_itemval(const uint8_t *data, unsigned int idx, unsigned 
     uint32_t value = 0;
 
     for (unsigned int i = 1; i <= size; i++)
-        value |= data[idx + i] << (8 * (i - 1));
+        value |= (uint32_t)data[idx + i] << (8 * (i - 1));
 
     return value;
 }
 
-struct hid_report *usbh_hid_report_parse(const uint8_t *data, uint32_t report_len, uint32_t max_usages)
+int usbh_hid_parse_report_descriptor(const uint8_t *report_data, uint32_t report_size, struct usbh_hid_report_info *report_info)
 {
+    struct usbh_hid_report_item_attribute current_item_attr = { 0 };
+    struct usbh_hid_report_item *current_item = NULL;
+    uint32_t itemtag, itemtype, itemsize, itemval;
+    uint16_t temp_usage;
+    uint32_t report_bit_offset;
     uint32_t i = 0;
-    uint32_t itemtag, itemtype, itemsize;
-    uint32_t itemval;
-    struct hid_report_field field;
-    uint32_t usage_page = 0, usage = 0, usage_min = 0, usage_max = 0, flags = 0;
-    uint32_t *usages;
-    struct hid_report *hid_report;
 
-    hid_report = usb_osal_malloc(sizeof(struct hid_report));
-    if (!hid_report) {
-        USB_LOG_ERR("hid report malloc failed\r\n");
-        return NULL;
-    }
+    memset(report_info, 0, sizeof(struct usbh_hid_report_info));
+    memset(&current_item_attr, 0, sizeof(struct usbh_hid_report_item_attribute));
+    current_item_attr.usage_min = 0xffff;
+    current_item_attr.usage_max = 0;
 
-    usages = usb_osal_malloc(sizeof(uint32_t) * max_usages);
-    if (!usages) {
-        USB_LOG_ERR("hid usages malloc failed\r\n");
-        goto err;
-    }
-
-    memset(hid_report, 0, sizeof(struct hid_report));
-    memset(&field, 0, sizeof(struct hid_report_field));
-
-    while (i < report_len) {
-        itemtag = data[i] & HID_TAG_MASK;
-        itemtype = data[i] & HID_TYPE_MASK;
-        itemsize = data[i] & HID_SIZE_MASK;
+    while (i < report_size) {
+        itemtag = report_data[i] & HID_TAG_MASK;
+        itemtype = report_data[i] & HID_TYPE_MASK;
+        itemsize = report_data[i] & HID_SIZE_MASK;
 
         if (itemsize == 3) /* HID spec: 6.2.2.2 - Short Items */
             itemsize = 4;
 
-        itemval = hid_get_itemval(data, i, itemsize);
+        if ((itemsize + i + 1) > report_size) {
+            goto err;
+        }
+
+        itemval = hid_get_itemval(report_data, i, itemsize);
 
         USB_LOG_DBG("itemtype 0x%02x, itemtag 0x%02x, itemsize %d, itemval 0x%08x\r\n",
                     itemtype, itemtag, itemsize, itemval);
@@ -338,88 +335,54 @@ struct hid_report *usbh_hid_report_parse(const uint8_t *data, uint32_t report_le
             case HID_ITEMTYPE_MAIN:
                 switch (itemtag) {
                     case HID_MAINITEM_TAG_INPUT:
-                        if ((flags & HID_REPORT_FLAG_REQUIRED_MASK) != HID_REPORT_FLAG_REQUIRED_MASK)
-                            goto err;
-
-                        if (hid_report->input_count >= CONFIG_USBHOST_HID_MAX_INPUT) {
-                            USB_LOG_ERR("hid input fields exceed max limit\r\n");
-                            goto err;
-                        }
-
-                        field.flags = flags;
-                        field.properties = itemval;
-                        field.usage_page = usage_page;
-                        memcpy(&hid_report->input_fields[hid_report->input_count], &field, sizeof(struct hid_report_field));
-                        if (field.usage_count > 0) {
-                            hid_report->input_fields[hid_report->input_count].usages = usb_osal_malloc(sizeof(uint32_t) * field.usage_count);
-                            if (!hid_report->input_fields[hid_report->input_count].usages) {
-                                USB_LOG_ERR("hid input usages malloc failed\r\n");
-                                goto err;
-                            }
-                            memcpy(hid_report->input_fields[hid_report->input_count].usages, usages, sizeof(uint32_t) * field.usage_count);
-                        }
-
-                        hid_report->input_count++;
-
-                        /* only keep the global items */
-                        flags &= HID_REPORT_FLAG_GLOBAL_MASK;
-                        memset(&field, 0, sizeof(struct hid_report_field));
-                        break;
                     case HID_MAINITEM_TAG_OUTPUT:
-                        if ((flags & HID_REPORT_FLAG_REQUIRED_MASK) != HID_REPORT_FLAG_REQUIRED_MASK)
-                            goto err;
-
-                        if (hid_report->output_count >= CONFIG_USBHOST_HID_MAX_OUTPUT) {
-                            USB_LOG_ERR("hid output fields exceed max limit\r\n");
+                    case HID_MAINITEM_TAG_FEATURE:
+                        if (report_info->report_item_count == CONFIG_USB_HID_MAX_REPORT_ITEMS) {
                             goto err;
                         }
 
-                        field.flags = flags;
-                        field.properties = itemval;
-                        field.usage_page = usage_page;
-                        memcpy(&hid_report->output_fields[hid_report->output_count], &field, sizeof(struct hid_report_field));
-                        if (field.usage_count > 0) {
-                            hid_report->output_fields[hid_report->output_count].usages = usb_osal_malloc(sizeof(uint32_t) * field.usage_count);
-                            if (!hid_report->output_fields[hid_report->output_count].usages) {
-                                USB_LOG_ERR("hid output usages malloc failed\r\n");
-                                goto err;
+                        current_item = &report_info->report_items[report_info->report_item_count];
+                        current_item->report_flags = itemval;
+
+                        if (itemtag == HID_MAINITEM_TAG_INPUT) {
+                            current_item->report_type = HID_REPORT_INPUT;
+                        } else if (itemtag == HID_MAINITEM_TAG_OUTPUT) {
+                            current_item->report_type = HID_REPORT_OUTPUT;
+                        } else {
+                            current_item->report_type = HID_REPORT_FEATURE;
+                        }
+
+                        report_bit_offset = 0;
+                        /* Resume the last field of this report type and ID. */
+                        for (uint32_t j = report_info->report_item_count; j > 0; j--) {
+                            const struct usbh_hid_report_item *previous = &report_info->report_items[j - 1];
+
+                            if (previous->report_type == current_item->report_type &&
+                                previous->attribute.report_id == current_item_attr.report_id) {
+                                report_bit_offset = previous->report_bit_offset +
+                                                    previous->attribute.report_size * previous->attribute.report_count;
+                                break;
                             }
-                            memcpy(hid_report->output_fields[hid_report->output_count].usages, usages, sizeof(uint32_t) * field.usage_count);
                         }
+                        /* Keep every stored field's end offset representable. */
+                        if (current_item_attr.report_size != 0 &&
+                            current_item_attr.report_count >
+                                (UINT32_MAX - report_bit_offset) / current_item_attr.report_size) {
+                            goto err;
+                        }
+                        current_item->report_bit_offset = report_bit_offset;
 
-                        hid_report->output_count++;
+                        memcpy(&current_item->attribute, &current_item_attr, sizeof(struct usbh_hid_report_item_attribute));
+                        report_info->report_item_count++;
 
-                        /* only keep the global items */
-                        flags &= HID_REPORT_FLAG_GLOBAL_MASK;
-                        memset(&field, 0, sizeof(struct hid_report_field));
+                        // reset for next item
+                        current_item_attr.usage_min = 0xffff;
+                        current_item_attr.usage_max = 0;
                         break;
                     case HID_MAINITEM_TAG_COLLECTION:
-                        memset(&field, 0, sizeof(struct hid_report_field));
-                        break;
-                    case HID_MAINITEM_TAG_FEATURE:
-
-                        if (hid_report->feature_count >= CONFIG_USBHOST_HID_MAX_FEATURE) {
-                            USB_LOG_ERR("hid feature fields exceed max limit\r\n");
-                            goto err;
-                        }
-
-                        field.flags = flags;
-                        field.properties = itemval;
-                        field.usage_page = usage_page;
-                        memcpy(&hid_report->feature_fields[hid_report->feature_count], &field, sizeof(struct hid_report_field));
-                        if (field.usage_count > 0) {
-                            hid_report->feature_fields[hid_report->feature_count].usages = usb_osal_malloc(sizeof(uint32_t) * field.usage_count);
-                            if (!hid_report->feature_fields[hid_report->feature_count].usages) {
-                                USB_LOG_ERR("hid feature usages malloc failed\r\n");
-                                goto err;
-                            }
-                            memcpy(hid_report->feature_fields[hid_report->feature_count].usages, usages, sizeof(uint32_t) * field.usage_count);
-                        }
-
-                        hid_report->feature_count++;
-
-                        memset(&field, 0, sizeof(struct hid_report_field));
-
+                        // reset for next item
+                        current_item_attr.usage_min = 0xffff;
+                        current_item_attr.usage_max = 0;
                         break;
                     case HID_MAINITEM_TAG_ENDCOLLECTION:
                         break;
@@ -430,33 +393,34 @@ struct hid_report *usbh_hid_report_parse(const uint8_t *data, uint32_t report_le
             case HID_ITEMTYPE_GLOBAL:
                 switch (itemtag) {
                     case HID_GLOBALITEM_TAG_USAGE_PAGE:
-                        usage_page = itemval;
-
-                        if (usage_page > UINT16_MAX)
-                            goto err;
-
-                        flags |= HID_REPORT_FLAG_USAGE_PAGE;
+                        current_item_attr.usage_page = (uint16_t)itemval;
                         break;
                     case HID_GLOBALITEM_TAG_LOGICAL_MIN:
-                        field.logical_min = (int32_t)itemval;
-                        flags |= HID_REPORT_FLAG_LOGICAL_MIN;
+                        current_item_attr.logical_min = itemval;
                         break;
                     case HID_GLOBALITEM_TAG_LOGICAL_MAX:
-                        field.logical_max = (int32_t)itemval;
-                        flags |= HID_REPORT_FLAG_LOGICAL_MAX;
+                        current_item_attr.logical_max = itemval;
+                        break;
+                    case HID_GLOBALITEM_TAG_PHYSICAL_MIN:
+                        current_item_attr.physical_min = itemval;
+                        break;
+                    case HID_GLOBALITEM_TAG_PHYSICAL_MAX:
+                        current_item_attr.physical_max = itemval;
+                        break;
+                    case HID_GLOBALITEM_TAG_UNIT_EXP:
+                        current_item_attr.unit_exponent = itemval;
+                        break;
+                    case HID_GLOBALITEM_TAG_UNIT:
+                        current_item_attr.unit = itemval;
                         break;
                     case HID_GLOBALITEM_TAG_REPORT_SIZE:
-                        field.report_size = itemval;
-                        flags |= HID_REPORT_FLAG_REPORT_SIZE;
+                        current_item_attr.report_size = itemval;
                         break;
                     case HID_GLOBALITEM_TAG_REPORT_COUNT:
-                        field.report_count = itemval;
-                        flags |= HID_REPORT_FLAG_REPORT_COUNT;
+                        current_item_attr.report_count = itemval;
                         break;
                     case HID_GLOBALITEM_TAG_REPORT_ID:
-                        hid_report->uses_report_id = true;
-                        field.report_id = itemval;
-                        flags |= HID_REPORT_FLAG_REPORT_ID;
+                        current_item_attr.report_id = itemval;
                         break;
                     default:
                         goto err;
@@ -465,64 +429,20 @@ struct hid_report *usbh_hid_report_parse(const uint8_t *data, uint32_t report_le
             case HID_ITEMTYPE_LOCAL:
                 switch (itemtag) {
                     case HID_LOCALITEM_TAG_USAGE:
-                        usage = itemval;
-                        /* Extended usage (size 4) combines both usage page and id */
-                        if (itemsize != 4) {
-                            if (!(flags & HID_REPORT_FLAG_USAGE_PAGE))
-                                goto err;
-                            usage |= usage_page << 16;
+                        if (itemsize == 4) {
+                            temp_usage = (uint16_t)(itemval >> 16);
+                        } else {
+                            temp_usage = (uint16_t)itemval;
                         }
-
-                        usages[field.usage_count++] = usage;
+                        current_item_attr.usage_min = MIN(current_item_attr.usage_min, temp_usage);
+                        current_item_attr.usage_max = MAX(current_item_attr.usage_max, temp_usage);
 
                         break;
                     case HID_LOCALITEM_TAG_USAGE_MIN:
-                        usage_min = itemval;
-                        if (itemsize == 4) {
-                            /* Usage max must be extended as well */
-                            flags |= HID_REPORT_FLAG_EXTENDED_USAGE;
-                        } else {
-                            if (!(flags & HID_REPORT_FLAG_USAGE_PAGE))
-                                goto err;
-                            usage_min |= usage_page << 16;
-                        }
-                        field.usage_min = usage_min;
-                        flags |= HID_REPORT_FLAG_USAGE_MIN;
+                        current_item_attr.usage_min = (uint16_t)itemval;
                         break;
                     case HID_LOCALITEM_TAG_USAGE_MAX:
-                        if (!(flags & HID_REPORT_FLAG_USAGE_MIN))
-                            goto err;
-
-                        usage_max = itemval;
-                        if (flags & HID_REPORT_FLAG_EXTENDED_USAGE) {
-                            /* Fail if max is not extended usage (HID spec 6.2.2.8) */
-                            if (itemsize != 4)
-                                goto err;
-                        } else if (itemsize == 4) {
-                            /* Fail because min wasn't extended, but max is */
-                            goto err;
-                        } else {
-                            if (!(flags & HID_REPORT_FLAG_USAGE_PAGE))
-                                goto err;
-                            usage_max |= usage_page << 16;
-                        }
-
-                        /* Usage min and max must be on the same page */
-                        if (USAGE_PAGE(usage_min) != USAGE_PAGE(usage_max)) {
-                            goto err;
-                        }
-
-                        if (usage_min > usage_max) {
-                            goto err;
-                        }
-
-                        for (uint32_t j = usage_min; j <= usage_max; j++) {
-                            usages[field.usage_count++] = j;
-                        }
-
-                        field.usage_max = usage_max;
-                        flags |= HID_REPORT_FLAG_USAGE_MAX;
-                        flags &= ~(HID_REPORT_FLAG_USAGE_MIN | HID_REPORT_FLAG_EXTENDED_USAGE);
+                        current_item_attr.usage_max = (uint16_t)itemval;
                         break;
                     default:
                         goto err;
@@ -534,127 +454,101 @@ struct hid_report *usbh_hid_report_parse(const uint8_t *data, uint32_t report_le
 
         i += (1 + itemsize);
     }
-    usb_osal_free(usages);
-    return hid_report;
+
+    return 0;
 err:
-    if (hid_report) {
-        usb_osal_free(hid_report);
+    return -1;
+}
 
-        for (uint32_t j = 0; j < hid_report->input_count; j++)
-            usb_osal_free(hid_report->input_fields[j].usages);
+int usbh_hid_report_convert(struct usbh_hid_report_item *item,
+                            const uint8_t *report_buf,
+                            uint16_t report_len,
+                            uint32_t *output1,
+                            uint8_t **output2,
+                            uint32_t *output_len)
+{
+    const uint8_t *src;
+    uint32_t available_bits;
+    uint32_t bits_len;
 
-        for (uint32_t j = 0; j < hid_report->output_count; j++)
-            usb_osal_free(hid_report->output_fields[j].usages);
-
-        for (uint32_t j = 0; j < hid_report->feature_count; j++)
-            usb_osal_free(hid_report->feature_fields[j].usages);
+    if (!item || !report_buf || !report_len || !output1 || !output2 || !output_len) {
+        return -1;
     }
 
-    if (usages)
-        usb_osal_free(usages);
-    return NULL;
-}
-
-void usbh_hid_report_free(struct hid_report *hid_report)
-{
-    if (hid_report) {
-        for (uint32_t j = 0; j < hid_report->input_count; j++)
-            usb_osal_free(hid_report->input_fields[j].usages);
-
-        for (uint32_t j = 0; j < hid_report->output_count; j++)
-            usb_osal_free(hid_report->output_fields[j].usages);
-
-        for (uint32_t j = 0; j < hid_report->feature_count; j++)
-            usb_osal_free(hid_report->feature_fields[j].usages);
-
-        usb_osal_free(hid_report);
+    if (item->attribute.report_size == 0 || item->attribute.report_count == 0 ||
+        (item->report_flags & HID_MAINITEM_CONSTANT)) {
+        return -1;
     }
-}
 
-USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_hid_report_buf[2048];
-
-static const char *hid_property_string(uint32_t value)
-{
-    uint32_t off = 0;
-    static char buffer[160];
-
-    memset(buffer, 0, sizeof(buffer));
-
-    if (value & HID_MAINITEM_CONSTANT)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Constant, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Data, ");
-
-    if (value & HID_MAINITEM_VARIABLE)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Variable, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Array, ");
-
-    if (value & HID_MAINITEM_RELATIVE)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Relative, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Absolute, ");
-
-    if (value & HID_MAINITEM_WRAP)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Wrap, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "NoWrap, ");
-
-    if (value & HID_MAINITEM_NONLINEAR)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "NonLinear, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Linear, ");
-
-    if (value & HID_MAINITEM_NOPREFERRED)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "NoPreferred, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Preferred, ");
-
-    if (value & HID_MAINITEM_NULLSTATE)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "NullState, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "NoNullState, ");
-
-    if (value & HID_MAINITEM_VOLATILE)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "Volatile, ");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "NonVolatile, ");
-
-    if (value & HID_MAINITEM_BUFFEREDBYTES)
-        off += snprintf(buffer + off, sizeof(buffer) - off, "BufferedBytes");
-    else
-        off += snprintf(buffer + off, sizeof(buffer) - off, "BitField");
-
-    return buffer;
-
-}
-
-static void usbh_hid_field_info_print(uint32_t idx, struct hid_report_field *field)
-{
-    USB_LOG_RAW("  Field %u:\r\n", idx);
-    USB_LOG_RAW("    Usage Page: 0x%04x\r\n", (unsigned int)field->usage_page);
-    USB_LOG_RAW("    Report ID: %u\r\n", (unsigned int)field->report_id);
-    USB_LOG_RAW("    Report Size: %ubit\r\n", (unsigned int)field->report_size);
-    USB_LOG_RAW("    Report Count: %u\r\n", (unsigned int)field->report_count);
-    USB_LOG_RAW("    Logical Min: %d\r\n", field->logical_min);
-    USB_LOG_RAW("    Logical Max: %d\r\n", field->logical_max);
-    USB_LOG_RAW("    Usage Count: %u\r\n", (unsigned int)field->usage_count);
-    if (field->usage_count > 0) {
-        if (field->usage_count == 1) {
-            USB_LOG_RAW("    Usage: 0x%04x\r\n", USAGE_ID(field->usages[0]));
-        } else {
-            USB_LOG_RAW("    Usages(0x%04x ~ 0x%04x)\r\n", USAGE_ID(field->usage_min), USAGE_ID(field->usage_max));
+    if (item->attribute.report_id > 0) {
+        if (report_buf[0] != item->attribute.report_id) {
+            return -2; /* report id mismatch */
         }
+
+        src = report_buf + 1; /* skip report id */
+        report_len--;
+    } else {
+        src = report_buf;
     }
-    USB_LOG_RAW("    Flags: 0x%04x\r\n", (unsigned int)field->flags);
-    USB_LOG_RAW("    Properties: 0x%04x(%s)\r\n", (unsigned int)field->properties, hid_property_string(field->properties));
+
+    available_bits = (uint32_t)report_len * 8U;
+    /* Check the remaining capacity before multiplying or adding bit counts. */
+    if (item->report_bit_offset > available_bits ||
+        item->attribute.report_count >
+            (available_bits - item->report_bit_offset) / item->attribute.report_size) {
+        return -USB_ERR_NOMEM;
+    }
+    bits_len = item->attribute.report_size * item->attribute.report_count;
+
+    if ((bits_len < 32) && (bits_len % 8 != 0)) {
+        *output1 = 0;
+
+        for (uint32_t i = 0; i < bits_len; i++) {
+            uint32_t bit_offset = item->report_bit_offset + i;
+            *output1 |= ((uint32_t)((src[bit_offset / 8] >> (bit_offset % 8)) & 0x01U)) << i;
+        }
+
+        *output2 = NULL;
+        *output_len = (bits_len + 7) / 8;
+        return 0;
+    } else if (bits_len % 8 == 0) {
+        if (item->report_bit_offset % 8 != 0) {
+            /* currently do not support item that is not byte aligned */
+            return -3;
+        }
+
+        uint32_t byte_len = bits_len / 8;
+        *output2 = (uint8_t *)src + item->report_bit_offset / 8;
+        *output_len = byte_len;
+        return 0;
+    }
+    return -4;
 }
+
+static void usbh_hid_item_info_print(struct usbh_hid_report_item *item)
+{
+    USB_LOG_RAW("Item Type: %s\r\n", (unsigned int)item->report_type == HID_REPORT_INPUT  ? "Input" :
+                                     (unsigned int)item->report_type == HID_REPORT_OUTPUT ? "Output" :
+                                                                                            "Feature");
+    USB_LOG_RAW("Usage Page: 0x%04x\r\n", (unsigned int)item->attribute.usage_page);
+    USB_LOG_RAW("Report ID: 0x%04x\r\n", (unsigned int)item->attribute.report_id);
+    USB_LOG_RAW("Report Size: %ubit\r\n", (unsigned int)item->attribute.report_size);
+    USB_LOG_RAW("Report Count: %u\r\n", (unsigned int)item->attribute.report_count);
+    USB_LOG_RAW("Usages(0x%04x ~ 0x%04x)\r\n", (unsigned int)item->attribute.usage_min, (unsigned int)item->attribute.usage_max);
+    USB_LOG_RAW("Logical Min: %d\r\n", item->attribute.logical_min);
+    USB_LOG_RAW("Logical Max: %d\r\n", item->attribute.logical_max);
+    USB_LOG_RAW("Properties: 0x%04x\r\n", (unsigned int)item->report_flags);
+    USB_LOG_RAW("Bit Offset: 0x%04x\r\n", (unsigned int)item->report_bit_offset);
+    USB_LOG_RAW("\r\n");
+}
+
+USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX uint8_t g_hid_report_desc_buf[2048];
 
 int lshid(int argc, char **argv)
 {
     struct usbh_hid *hid_class;
-    struct hid_report *hid_report;
     int ret;
+    struct usbh_hid_report_info report_info = { 0 };
 
     if (argc < 2) {
         USB_LOG_ERR("please input correct command: lshid path\r\n");
@@ -667,43 +561,28 @@ int lshid(int argc, char **argv)
         return -1;
     }
 
-    if (hid_class->report_size > sizeof(g_hid_report_buf)) {
+    if (hid_class->report_size > sizeof(g_hid_report_desc_buf)) {
         USB_LOG_ERR("hid report buffer is too small\r\n");
         return -1;
     }
 
-    ret = usbh_hid_get_report_descriptor(hid_class, g_hid_report_buf, hid_class->report_size);
+    ret = usbh_hid_get_report_descriptor(hid_class, g_hid_report_desc_buf, hid_class->report_size);
     if (ret < 0) {
         USB_LOG_ERR("get hid report descriptor failed, errcode: %d\r\n", ret);
         return -1;
     }
 
-    hid_report = usbh_hid_report_parse(g_hid_report_buf, hid_class->report_size, 1024);
-    if (hid_report) {
-        USB_LOG_RAW("HID report parsed successfully\r\n");
-
-        USB_LOG_RAW("Input fields: %u\r\n", (unsigned int)hid_report->input_count);
-        for (uint32_t i = 0; i < hid_report->input_count; i++) {
-            struct hid_report_field *field = &hid_report->input_fields[i];
-            usbh_hid_field_info_print(i, field);
-        }
-
-        USB_LOG_RAW("Output fields: %u\r\n", (unsigned int)hid_report->output_count);
-        for (uint32_t i = 0; i < hid_report->output_count; i++) {
-            struct hid_report_field *field = &hid_report->output_fields[i];
-            usbh_hid_field_info_print(i, field);
-        }
-
-        USB_LOG_RAW("Feature fields: %u\r\n", (unsigned int)hid_report->feature_count);
-        for (uint32_t i = 0; i < hid_report->feature_count; i++) {
-            struct hid_report_field *field = &hid_report->feature_fields[i];
-            usbh_hid_field_info_print(i, field);
-        }
-
-        usbh_hid_report_free(hid_report);
-    } else {
-        USB_LOG_ERR("HID report parsed failed\r\n");
+    ret = usbh_hid_parse_report_descriptor(g_hid_report_desc_buf, hid_class->report_size, &report_info);
+    if (ret < 0) {
+        USB_LOG_ERR("parse hid report descriptor failed\r\n");
+        return -1;
     }
+
+    USB_LOG_INFO("HID report item count: %u\r\n", report_info.report_item_count);
+    for (uint32_t i = 0; i < report_info.report_item_count; i++) {
+        usbh_hid_item_info_print(&report_info.report_items[i]);
+    }
+
     return 0;
 }
 

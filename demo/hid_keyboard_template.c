@@ -13,7 +13,7 @@
 
 #define HID_INT_EP          0x81
 #define HID_INT_EP_SIZE     8
-#define HID_INT_EP_INTERVAL 10
+#define HID_INT_EP_INTERVAL 1
 
 #define USB_CONFIG_SIZE       34
 #define HID_KEYBOARD_REPORT_DESC_SIZE 63
@@ -67,7 +67,7 @@ static const uint8_t *device_quality_descriptor_callback(uint8_t speed)
 
 static const char *string_descriptor_callback(uint8_t speed, uint8_t index)
 {
-    if (index > 3) {
+    if (index >= (sizeof(string_descriptors) / sizeof(char *))) {
         return NULL;
     }
     return string_descriptors[index];
